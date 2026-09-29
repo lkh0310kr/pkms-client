@@ -16,8 +16,8 @@ final class NavigationUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Couldn’t Open Note"].exists)
 
         app.buttons["Markdown Showcase"].firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["A relative image path:"].waitForExistence(timeout: 5)
-                      || app.staticTexts["Lists"].waitForExistence(timeout: 5),
-                      "Tapping a note should render it")
+        let note = app.textViews.firstMatch
+        XCTAssertTrue(note.waitForExistence(timeout: 5), "Tapping a note should open it")
+        XCTAssertTrue((note.value as? String)?.hasPrefix("# Markdown Showcase") == true)
     }
 }

@@ -275,22 +275,6 @@ enum MarkdownEditing {
         return TextEdit(range: selection, replacement: replacement, selection: NSRange(location: caret, length: 0))
     }
 
-    // MARK: - Tasks
-
-    /// Toggles `[ ]` ↔ `[x]` on the given 0-based line, or returns `nil` if it isn't a task.
-    static func togglingTask(atLine index: Int, in text: String) -> String? {
-        var lines = text.components(separatedBy: "\n")
-        guard lines.indices.contains(index) else { return nil }
-        let line = lines[index]
-        let p = prefix(of: line)
-        guard p.style == .todo, let open = p.marker.firstIndex(of: "[") else { return nil }
-        let checked = p.marker[p.marker.index(after: open)] != " "
-        var marker = p.marker
-        marker.replaceSubrange(marker.index(after: open)...marker.index(after: open), with: checked ? " " : "x")
-        lines[index] = p.indent + marker + (String(line.utf16.dropFirst(p.length)) ?? "")
-        return lines.joined(separator: "\n")
-    }
-
     // MARK: - Suggestions
 
     enum SuggestionKind: Equatable {

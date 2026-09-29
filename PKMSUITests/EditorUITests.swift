@@ -27,18 +27,42 @@ final class EditorUITests: XCTestCase {
 
         XCTAssertEqual(editor.value as? String, "# Groceries\n- [ ] Milk\n- [ ] Eggs\n\nDone for today")
 
+        // Dismissing the keyboard renders the whole note and names the file after its first line.
         app.buttons["Done"].tap()
-
-        // The note is rendered and took its name from the first line.
-        XCTAssertTrue(app.staticTexts["Milk"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.navigationBars["Groceries"].waitForExistence(timeout: 5), "Untitled note should be renamed from its title")
-
-        // Text after the list stays a separate paragraph.
-        XCTAssertTrue(app.staticTexts["Done for today"].exists)
-        // Checkboxes work in reading mode.
-        app.buttons["Not completed"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["Completed"].waitForExistence(timeout: 3))
         attach(app, "rendered")
+
+        // Tapping a drawn checkbox checks the task without opening the keyboard.
+        let note = app.textViews.firstMatch
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        checkbox(in: note, line: 1).tap()
+        XCTAssertEqual(note.value as? String, "# Groceries\n- [x] Milk\n- [ ] Eggs\n\nDone for today")
+        XCTAssertFalse(app.buttons["Done"].exists, "Toggling a checkbox shouldn't start editing")
+        attach(app, "checked")
+    }
+
+    @MainActor
+    func testShowcaseRendersInPlace() {
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Notes"].firstMatch.tap()
+        app.buttons["Markdown Showcase"].firstMatch.tap()
+        let note = app.textViews.firstMatch
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        attach(app, "showcase-top")
+        note.swipeUp(velocity: .slow)
+        attach(app, "showcase-middle")
+        note.swipeUp(velocity: .slow)
+        note.swipeUp(velocity: .slow)
+        attach(app, "showcase-bottom")
+    }
+
+    /// Where the checkbox of the task on `line` (1-based, below a level-1 heading) is drawn.
+    @MainActor
+    private func checkbox(in note: XCUIElement, line: Int) -> XCUICoordinate {
+        // Measured from screenshots: text inset 16 + line padding 5, box 20 wide; items 24pt apart below the title.
+        return note.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: 21 + 10, dy: 35 + CGFloat(line) * 24))
     }
 
     @MainActor

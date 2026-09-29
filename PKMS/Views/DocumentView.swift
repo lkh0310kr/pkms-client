@@ -1,31 +1,31 @@
 import SwiftUI
 
-/// Shows one note, rendered for reading, with an Edit mode for changing it.
+/// Shows one note in the live-preview editor: it reads like a rendered page and becomes editable
+/// wherever you tap, like Obsidian or Notion. There's no separate viewing mode.
 struct DocumentView: View {
     let path: VaultPath
 
     @Environment(VaultStore.self) private var store
     @Environment(SyncController.self) private var sync
     @Environment(\.openDocument) private var openDocument
-    @State private var state: LoadState = .loading
-    @State private var rawText: String?
-    @State private var isEditing = false
-    @State private var focusEditor = false
+    @Environment(\.openURL) private var openURL
+    @State private var text: String?
+    @State private var loadError: String?
     @State private var editorText = ""
+    @State private var focusOnAppear = false
+    @State private var controller = EditorController()
     @State private var reviewingConflict = false
-
-    private enum LoadState {
-        case loading
-        case loaded(MarkdownDocument)
-        case failed(String)
-    }
 
     var body: some View {
         Group {
-            if isEditing, let rawText {
-                NoteEditorView(path: path, initialText: rawText, focusOnAppear: focusEditor, text: $editorText)
+            if let text {
+                NoteEditorView(path: path, initialText: text, focusOnAppear: focusOnAppear, text: $editorText,
+                               controller: controller, onOpenLink: open, onEndEditing: finishEditing)
+            } else if let loadError {
+                ContentUnavailableView("Couldn’t Open Note", systemImage: "exclamationmark.triangle",
+                                       description: Text(loadError))
             } else {
-                content
+                ProgressView()
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) { conflictBanner }
@@ -34,32 +34,19 @@ struct DocumentView: View {
         .toolbarRole(.editor)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { SyncStatusIcon() }
-            ToolbarItem(placement: .topBarTrailing) {
-                if isEditing {
-                    Button("Done") { Task { await finishEditing() } }
+            if controller.isFocused {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { controller.dismissKeyboard() }
                         .fontWeight(.semibold)
-                } else {
-                    Button("Edit", systemImage: "square.and.pencil") { startEditing(focus: true) }
-                        .disabled(rawText == nil)
                 }
             }
         }
-        .task(id: "\(path)#\(store.revision)") {
-            if !isEditing { await load() }
-        }
-        .onAppear {
-            if store.pendingEdit == path {
-                store.pendingEdit = nil
-                Task {
-                    await load()
-                    startEditing(focus: true)
-                }
-            }
+        .task {
+            await load()
         }
         .onDisappear {
-            if isEditing { Task { await finishEditing() } }
+            if controller.isFocused { finishEditing() }
         }
-        .environment(\.openURL, OpenURLAction(handler: open))
         .sheet(isPresented: $reviewingConflict) {
             if let copy = sync.conflicts[path] {
                 ConflictReviewView(path: path, remoteCopy: copy)
@@ -73,43 +60,6 @@ struct DocumentView: View {
             path.baseName
         } set: { newTitle in
             Task { try? await store.rename(path, to: newTitle) }
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        switch state {
-        case .loading:
-            ProgressView()
-        case .failed(let message):
-            ContentUnavailableView("Couldn’t Open Note", systemImage: "exclamationmark.triangle",
-                                   description: Text(message))
-        case .loaded(let document):
-            ScrollView {
-                if document.blocks.isEmpty {
-                    Button { startEditing(focus: true) } label: {
-                        Text("Empty note. Tap to start writing.")
-                            .foregroundStyle(.tertiary)
-                            .frame(maxWidth: .infinity, minHeight: 200)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    MarkdownView(blocks: document.blocks, lazy: true)
-                        .environment(\.markdownDocumentPath, path)
-                        .environment(\.toggleTask, TaskToggleAction { line in
-                            Task { try? await store.toggleTask(atLine: line + document.lineOffset, in: path) }
-                        })
-                        .textSelection(.enabled)
-                        .frame(maxWidth: 720, alignment: .leading)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 16)
-                        .frame(maxWidth: .infinity)
-                }
-            }
-            .refreshable {
-                await sync.sync()
-                await load()
-            }
         }
     }
 
@@ -140,30 +90,23 @@ struct DocumentView: View {
 
     private func load() async {
         do {
-            let text = try await store.repository.readText(at: path)
-            let document = await Task.detached(priority: .userInitiated) { MarkdownParser.parse(text) }.value
-            rawText = text
-            state = .loaded(document)
+            let loaded = try await store.repository.readText(at: path)
+            editorText = loaded
+            if store.pendingEdit == path {
+                store.pendingEdit = nil
+                focusOnAppear = true
+            }
+            text = loaded
         } catch {
-            state = .failed(error.localizedDescription)
+            loadError = error.localizedDescription
         }
     }
 
-    private func startEditing(focus: Bool) {
-        guard let rawText else { return }
-        editorText = rawText
-        focusEditor = focus
-        withAnimation(.easeInOut(duration: 0.15)) { isEditing = true }
-    }
-
-    private func finishEditing() async {
+    /// When the keyboard goes away: name new notes after their first line and sync soon.
+    private func finishEditing() {
         store.flushPendingEdits()
-        let text = editorText
-        rawText = text
-        state = .loaded(MarkdownParser.parse(text))
-        withAnimation(.easeInOut(duration: 0.15)) { isEditing = false }
-        await renameUntitledNote(from: text)
         sync.scheduleSync(after: .seconds(1))
+        Task { await renameUntitledNote(from: editorText) }
     }
 
     /// New notes start as "Untitled"; once they have a first line, the file takes that as its name.
@@ -179,20 +122,20 @@ struct DocumentView: View {
     }
 
     /// Routes taps on links: vault documents open in-app, web links go to the system.
-    private func open(_ url: URL) -> OpenURLAction.Result {
-        let string = url.absoluteString
-        let resolved: VaultPath?
-        if let target = WikiLink.target(in: string) {
-            resolved = store.index.resolve(target, from: path, isWikiLink: true)
-        } else if url.scheme == nil {
-            if string.hasPrefix("#") { return .handled }  // in-page anchors: not supported yet
-            resolved = store.index.resolve(string, from: path, isWikiLink: false)
-        } else {
-            return .systemAction
+    private func open(_ target: String) {
+        if let wiki = WikiLink.target(in: target) {
+            if let resolved = store.index.resolve(wiki, from: path, isWikiLink: true), resolved.isMarkdown {
+                openDocument(resolved)
+            }
+            return
         }
-        guard let resolved, resolved.isMarkdown else { return .discarded }
-        openDocument(resolved)
-        return .handled
+        if let url = URL(string: target) ?? MarkdownParser.makeURL(target), url.scheme != nil {
+            openURL(url)
+            return
+        }
+        if let resolved = store.index.resolve(target, from: path, isWikiLink: false), resolved.isMarkdown {
+            openDocument(resolved)
+        }
     }
 }
 

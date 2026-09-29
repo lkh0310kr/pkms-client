@@ -1,6 +1,6 @@
-# PKMS: Markdown Vault Viewer
+# PKMS: Markdown Vault
 
-A native SwiftUI iOS/iPadOS viewer for a folder of Markdown files. The files are the source of truth. The folder can be pulled from a GitHub repository, public or private.
+A native SwiftUI iOS/iPadOS app for a folder of Markdown files, with a live-preview editor. The files are the source of truth. The folder syncs both ways with a GitHub repository, public or private.
 
 ## Run
 
@@ -28,18 +28,21 @@ VaultStore (@Observable)  →  MarkdownParser → MarkdownDocument  →  SwiftUI
 |---|---|
 | Vault | `VaultPath`, `FileIndex`, `VaultRepository` (protocol + local impl), `VaultStore` |
 | Markdown | `MarkdownParser` (swift-markdown AST → block model, wiki-link preprocessing), `MarkdownDocument` |
-| Views | `RootView` (split view), `FolderView`, `DocumentView`, `MarkdownView`, `TableView`, `VaultImageView` |
+| Views | `RootView` (split view), `FolderView`, `DocumentView` (hosts the editor), `MarkdownView` (conflict review), `TableView`, `VaultImageView` |
+| Editor | `MarkdownEditorView` (text view + taps), `MarkdownHighlighter` (live-preview styling), `LivePreview` (layout manager, decorations, widget cache), `MarkdownEditing` (pure editing commands), `NoteEditorView` (autosave, menus, formatting bar) |
+| Sync | `GitHubClient` (REST), `GitHubAuth` (Device Flow + Keychain), `SyncPlanner` (3-way rules), `TextMerge`, `SyncEngine` (pull + upload), `SyncController` (app state) |
 
-| Sync | `GitHubClient` (REST), `GitHubAuth` (Device Flow + Keychain), `SyncPlanner` (3-way rules), `SyncEngine` (pull), `SyncController` (app state) |
+## Editing: live preview
 
-## Editing (Phase 3)
+There's no separate viewer. A note is always the editor, and it works like Obsidian's Live Preview:
 
-- **Live-styled editor:** you edit plain Markdown, but headings, emphasis, code and links are styled as you type. Syntax characters are dimmed.
+- **Rendered in place:** everywhere except the line you're editing, Markdown syntax is hidden. Headings, bold and links render; checkboxes, bullets and rules are drawn; images and tables show as pictures. With the keyboard down, the whole note reads as a rendered page.
+- **Tap to edit:** tap text to edit it, and that line shows its syntax (dimmed). Tap a checkbox to toggle it without opening the keyboard. Tap a link to follow it. Tap an image or table to edit its source.
+- **How it works:** the text view holds the exact Markdown. `MarkdownHighlighter` marks syntax as hidden and adds decorations. `LivePreviewLayoutManager` (TextKit 1) turns hidden characters into zero-width glyphs and draws the decorations. Nothing is ever inserted into the text, so the file stays plain Markdown.
 - **`/` menu:** type `/` at a line start (or after a space) to get headings, to-do, bulleted and numbered lists, quote, code and divider. `[[` suggests pages to link.
 - **Lists:** Return continues a list. Return on an empty item outdents it or ends the list, leaving a blank line so Markdown keeps the next paragraph separate. There's a formatting bar above the keyboard. On iPad: ⌘B, ⌘I, ⌘K, ⌘L, and Tab / ⇧Tab to indent.
 - **Saving:** notes save automatically (600 ms after typing stops).
-- **New notes:** a new note opens in the editor. An "Untitled" note takes its first line as its file name. You can rename from the title menu or the folder list.
-- **Read mode:** checkboxes can be tapped directly.
+- **New notes:** a new note opens with the keyboard up. When the keyboard goes away, an "Untitled" note takes its first line as its file name. You can rename from the title menu or the folder list.
 
 ## GitHub sync (two-way)
 

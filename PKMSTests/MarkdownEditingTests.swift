@@ -67,12 +67,6 @@ struct MarkdownEditingTests {
         #expect(empty == "**" && emptySel == caret(1))
     }
 
-    @Test func togglesTaskLines() {
-        #expect(MarkdownEditing.togglingTask(atLine: 1, in: "# T\n- [ ] a\n- [x] b") == "# T\n- [x] a\n- [x] b")
-        #expect(MarkdownEditing.togglingTask(atLine: 2, in: "# T\n- [ ] a\n  * [X] b") == "# T\n- [ ] a\n  * [ ] b")
-        #expect(MarkdownEditing.togglingTask(atLine: 0, in: "# T") == nil)
-    }
-
     @Test func detectsSuggestionTriggers() {
         let slash = MarkdownEditing.suggestionContext(in: "hello\n/hea", selection: caret(10))
         #expect(slash == .init(kind: .command, query: "hea", range: NSRange(location: 6, length: 4)))
@@ -80,14 +74,5 @@ struct MarkdownEditingTests {
         let page = MarkdownEditing.suggestionContext(in: "see [[Proj", selection: caret(10))
         #expect(page == .init(kind: .page, query: "Proj", range: NSRange(location: 4, length: 6)))
         #expect(MarkdownEditing.suggestionContext(in: "see [[Proj]] ", selection: caret(13)) == nil)
-    }
-
-    @Test func parserReportsTaskLinesAfterFrontMatter() {
-        let document = MarkdownParser.parse("---\na: 1\n---\n# T\n- [ ] task")
-        guard case .list(let list) = document.blocks.last else {
-            Issue.record("Expected list")
-            return
-        }
-        #expect(list.items.first?.sourceLine.map { $0 + document.lineOffset } == 4)
     }
 }

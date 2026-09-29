@@ -4,14 +4,23 @@ import UIKit
 /// A GitHub-style table that scrolls horizontally when it's wider than the page.
 struct TableView: View {
     let table: MarkdownTable
+    /// Scroll horizontally when wider than the page; off when rendered to an image.
+    var scrolls = true
 
     private static let maxColumnWidth: CGFloat = 280
     private static let cellPadding: CGFloat = 10
 
     var body: some View {
+        if scrolls {
+            ScrollView(.horizontal, showsIndicators: false) { grid }
+        } else {
+            grid
+        }
+    }
+
+    private var grid: some View {
         let widths = columnWidths()
-        ScrollView(.horizontal, showsIndicators: false) {
-            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+        return Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
                     ForEach(Array(widths.indices), id: \.self) { column in
                         cell(table.header[safe: column], column: column, width: widths[column])
@@ -31,7 +40,6 @@ struct TableView: View {
             .fixedSize(horizontal: false, vertical: true)
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(.separator)))
             .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
     }
 
     private func cell(_ text: AttributedString?, column: Int, width: CGFloat) -> some View {

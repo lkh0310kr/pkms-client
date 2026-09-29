@@ -11,7 +11,7 @@ enum MarkdownParser {
         let frontMatter = frontMatterLineCount(text)
         let body = text.components(separatedBy: "\n").dropFirst(frontMatter).joined(separator: "\n")
         let document = Document(parsing: preprocessWikiLinks(body))
-        return MarkdownDocument(blocks: blocks(from: document.children), lineOffset: frontMatter)
+        return MarkdownDocument(blocks: blocks(from: document.children))
     }
 
     // MARK: - Preprocessing
@@ -137,8 +137,7 @@ enum MarkdownParser {
             case .unchecked: false
             case nil: nil
             }
-            let line = item.range.map { $0.lowerBound.line - 1 }
-            return MarkdownList.Item(checkbox: checkbox, blocks: blocks(from: item.children), sourceLine: line)
+            return MarkdownList.Item(checkbox: checkbox, blocks: blocks(from: item.children))
         }
     }
 

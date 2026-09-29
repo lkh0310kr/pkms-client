@@ -4,13 +4,6 @@ extension EnvironmentValues {
     /// The document being rendered; relative links and images resolve against its folder.
     @Entry var markdownDocumentPath = VaultPath.root
     @Entry var markdownListDepth = 0
-    /// Set by the document view to make task checkboxes tappable.
-    @Entry var toggleTask: TaskToggleAction?
-}
-
-/// Toggles the task on a 0-based source line of the rendered document.
-struct TaskToggleAction {
-    let handler: @MainActor (Int) -> Void
 }
 
 /// Renders a sequence of Markdown blocks with native SwiftUI views.
@@ -136,7 +129,6 @@ private struct CodeBlockView: View {
 private struct ListView: View {
     let list: MarkdownList
     @Environment(\.markdownListDepth) private var depth
-    @Environment(\.toggleTask) private var toggleTask
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -158,16 +150,8 @@ private struct ListView: View {
     @ViewBuilder
     private func marker(index: Int, item: MarkdownList.Item) -> some View {
         if let checked = item.checkbox {
-            let box = Image(systemName: checked ? "checkmark.square.fill" : "square")
+            Image(systemName: checked ? "checkmark.square.fill" : "square")
                 .foregroundStyle(checked ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-            if let toggleTask, let line = item.sourceLine {
-                Button { toggleTask.handler(line) } label: { box.contentShape(.rect) }
-                    .buttonStyle(.plain)
-                    .sensoryFeedback(.selection, trigger: checked)
-                    .accessibilityLabel(checked ? "Completed" : "Not completed")
-            } else {
-                box
-            }
         } else if list.isOrdered {
             Text("\(list.startIndex + index).").monospacedDigit().foregroundStyle(.secondary)
         } else {

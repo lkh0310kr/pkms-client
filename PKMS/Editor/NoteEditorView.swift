@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Edits one note. Changes are saved automatically shortly after typing pauses, and
 /// changes arriving from sync are merged into the open editor.
@@ -6,17 +7,21 @@ struct NoteEditorView: View {
     let path: VaultPath
     let initialText: String
     var focusOnAppear = false
-    /// Latest text, for the parent to render when editing ends.
+    /// Latest text, kept for the parent.
     @Binding var text: String
+    /// Controls owned by the parent (e.g. a Done button), so it's passed in.
+    let controller: EditorController
+    var onOpenLink: (String) -> Void = { _ in }
+    var onEndEditing: () -> Void = {}
 
     @Environment(VaultStore.self) private var store
-    @State private var controller = EditorController()
+    @State private var widgets = WidgetCache()
     @State private var saveTask: Task<Void, Never>?
     @State private var lastSaved: String?
     @State private var flushID = UUID()
 
     var body: some View {
-        MarkdownEditorView(initialText: initialText, controller: controller) { newText in
+        MarkdownEditorView(initialText: initialText, controller: controller, widgets: widgets) { newText in
             text = newText
             scheduleSave()
         }
@@ -38,6 +43,12 @@ struct NoteEditorView: View {
             text = initialText
             store.registerFlush(flushID) { saveNow() }
             controller.onSuggestionReturn = { chooseHighlightedSuggestion() }
+            controller.onOpenLink = onOpenLink
+            controller.onEndEditing = {
+                saveNow()
+                onEndEditing()
+            }
+            widgets.loadImage = { [store, path] source in await Self.loadImage(source, from: path, store: store) }
             if focusOnAppear {
                 Task {
                     try? await Task.sleep(for: .milliseconds(350))
@@ -50,6 +61,22 @@ struct NoteEditorView: View {
             store.unregisterFlush(flushID)
         }
         .onChange(of: store.revision) { mergeChangesFromDisk() }
+    }
+
+    // MARK: - Images
+
+    /// Loads an image referenced from the note: a vault file (relative path or wiki embed) or a web URL.
+    private static func loadImage(_ source: String, from path: VaultPath, store: VaultStore) async -> UIImage? {
+        let data: Data?
+        if let url = URL(string: source), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            data = try? await URLSession.shared.data(from: url).0
+        } else {
+            let wikiTarget = WikiLink.target(in: source)
+            guard let resolved = store.index.resolve(wikiTarget ?? source, from: path, isWikiLink: wikiTarget != nil) else { return nil }
+            data = try? await store.repository.readData(at: resolved)
+        }
+        guard let data else { return nil }
+        return await Task.detached(priority: .userInitiated) { UIImage(data: data)?.preparingForDisplay() }.value
     }
 
     // MARK: - Saving

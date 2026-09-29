@@ -88,14 +88,6 @@ final class VaultStore {
         await changedStructure()
     }
 
-    /// Checks or unchecks the task list item on `line` (0-based) of a note.
-    func toggleTask(atLine line: Int, in path: VaultPath) async throws {
-        let text = try await repository.readText(at: path)
-        guard let toggled = MarkdownEditing.togglingTask(atLine: line, in: text) else { return }
-        try save(toggled, to: path)
-        revision += 1
-    }
-
     /// Returns `path` unless a file already exists there, in which case " 2", " 3", … is appended.
     func uniquePath(named name: String, extension ext: String?, in folder: VaultPath) -> VaultPath {
         func candidate(_ n: Int) -> VaultPath {
