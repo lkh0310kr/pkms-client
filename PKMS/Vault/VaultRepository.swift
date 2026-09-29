@@ -1,11 +1,10 @@
 import Foundation
 
-/// Read access to the vault's files. The UI and view models depend only on this protocol,
-/// never on `FileManager`, so the storage and sync strategy can change underneath them.
+/// Access to the vault's files. The UI and view models depend only on this protocol,
+/// never on `FileManager`, so the storage strategy can change underneath them.
 ///
-/// Phase 1 has a single implementation backed by a local directory. A future GitHub sync
-/// engine will write into that same directory and then ask the app to reload the index;
-/// it does not need a different repository.
+/// The sync engine works on the same local directory and never goes through this protocol;
+/// after a sync the app just reloads the index.
 protocol VaultRepository: Sendable {
     /// Scans the vault and builds a fresh index.
     func loadIndex() async throws -> FileIndex
@@ -13,14 +12,24 @@ protocol VaultRepository: Sendable {
     func readText(at path: VaultPath) async throws -> String
     /// Reads raw bytes (an image or other asset).
     func readData(at path: VaultPath) async throws -> Data
+
+    /// Atomically replaces (or creates) a text file, creating parent folders as needed.
+    func writeText(_ text: String, to path: VaultPath) throws
+    func createFolder(at path: VaultPath) throws
+    /// Renames or moves a file or folder. Fails if `destination` already exists.
+    func move(_ path: VaultPath, to destination: VaultPath) throws
+    func delete(_ path: VaultPath) throws
+    func exists(_ path: VaultPath) -> Bool
 }
 
 enum VaultError: LocalizedError {
     case unreadableText(VaultPath)
+    case alreadyExists(VaultPath)
 
     var errorDescription: String? {
         switch self {
         case .unreadableText(let path): "“\(path.name)” is not a UTF-8 text file."
+        case .alreadyExists(let path): "“\(path.name)” already exists."
         }
     }
 }
@@ -44,6 +53,35 @@ struct LocalVaultRepository: VaultRepository {
 
     func readData(at path: VaultPath) async throws -> Data {
         try Data(contentsOf: url(for: path), options: .mappedIfSafe)
+    }
+
+    func writeText(_ text: String, to path: VaultPath) throws {
+        let url = url(for: path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: url, options: .atomic)
+    }
+
+    func createFolder(at path: VaultPath) throws {
+        try FileManager.default.createDirectory(at: url(for: path), withIntermediateDirectories: true)
+    }
+
+    func move(_ path: VaultPath, to destination: VaultPath) throws {
+        guard path != destination else { return }
+        // Allow case-only renames ("note" → "Note") on case-insensitive file systems.
+        if exists(destination), path.string.lowercased() != destination.string.lowercased() {
+            throw VaultError.alreadyExists(destination)
+        }
+        let target = url(for: destination)
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: url(for: path), to: target)
+    }
+
+    func delete(_ path: VaultPath) throws {
+        try FileManager.default.removeItem(at: url(for: path))
+    }
+
+    func exists(_ path: VaultPath) -> Bool {
+        FileManager.default.fileExists(atPath: url(for: path).path(percentEncoded: false))
     }
 
     func url(for path: VaultPath) -> URL {

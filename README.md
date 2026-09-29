@@ -32,12 +32,23 @@ VaultStore (@Observable)  →  MarkdownParser → MarkdownDocument  →  SwiftUI
 
 | Sync | `GitHubClient` (REST), `GitHubAuth` (Device Flow + Keychain), `SyncPlanner` (3-way rules), `SyncEngine` (pull), `SyncController` (app state) |
 
-## GitHub sync (Phase 2: pull only)
+## Editing (Phase 3)
+
+- **Live-styled editor:** you edit plain Markdown, but headings, emphasis, code and links are styled as you type. Syntax characters are dimmed.
+- **`/` menu:** type `/` at a line start (or after a space) to get headings, to-do, bulleted and numbered lists, quote, code and divider. `[[` suggests pages to link.
+- **Lists:** Return continues a list. Return on an empty item outdents it or ends the list, leaving a blank line so Markdown keeps the next paragraph separate. There's a formatting bar above the keyboard. On iPad: ⌘B, ⌘I, ⌘K, ⌘L, and Tab / ⇧Tab to indent.
+- **Saving:** notes save automatically (600 ms after typing stops).
+- **New notes:** a new note opens in the editor. An "Untitled" note takes its first line as its file name. You can rename from the title menu or the folder list.
+- **Read mode:** checkboxes can be tapped directly.
+
+## GitHub sync (two-way)
 
 - **Sign-in:** OAuth Device Flow, with a personal access token as a fallback. The token is stored in the Keychain.
 - **One-time setup for "Sign in with GitHub":** create an OAuth App at <https://github.com/settings/developers>, enable **Device Flow**, and put its Client ID in `GitHubAppConfig.clientID` (`PKMS/Sync/GitHubAuth.swift`). No client secret is needed.
+- **Upload:** local edits are uploaded about 4 seconds after they're saved, when leaving the editor, and when the app goes to the background. They're sent as one commit through the Git Data API (blobs → tree → commit → fast-forward ref update). If the branch moved in the meantime, the app pulls again and retries.
 - **How a pull works:** it fetches the branch head, then the recursive tree, and downloads only the blobs whose git SHA-1 differs from the local file. Downloads are checked against the SHA and written atomically.
-- **Change detection:** three-way, comparing the last-synced base, the local file and the remote file. Files changed on the device are never overwritten or deleted; they're reported as local changes or conflicts.
+- **Change detection:** three-way, comparing the last-synced base, the local file and the remote file. An edit always wins over a delete.
+- **Edits on both sides:** they're merged line by line when they touch different lines. Otherwise GitHub's version is saved as `Note (GitHub version).md` and held back from upload until the user picks *this device*, *GitHub* or *both* in the review sheet.
 - **Sync state** lives in `Application Support/Sync/state.json`, outside the vault.
 - **Switching repositories** moves the current vault to `Application Support/Backups/`.
 - **When it syncs:** on launch (after the local vault is shown), on returning to the foreground (at most once a minute), on pull-to-refresh, and from Settings → Sync Now.

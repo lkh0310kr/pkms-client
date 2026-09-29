@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct PKMSApp: App {
@@ -25,7 +26,21 @@ struct PKMSApp: App {
                     await sync.sync()
                 }
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { Task { await sync.syncIfStale() } }
+                    switch phase {
+                    case .active:
+                        Task { await sync.syncIfStale() }
+                    case .background:
+                        // Save and upload edits before iOS suspends the app.
+                        store.flushPendingEdits()
+                        guard sync.hasLocalChanges else { return }
+                        let task = UIApplication.shared.beginBackgroundTask(withName: "Sync")
+                        Task {
+                            await sync.sync()
+                            UIApplication.shared.endBackgroundTask(task)
+                        }
+                    default:
+                        break
+                    }
                 }
         }
     }

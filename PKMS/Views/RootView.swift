@@ -18,6 +18,7 @@ extension EnvironmentValues {
 
 /// Split view on iPad (files | document); collapses into a single stack on iPhone.
 struct RootView: View {
+    @Environment(VaultStore.self) private var store
     @State private var folderStack: [FolderRoute] = []
     @State private var selection: VaultPath?
     /// Documents opened by following links from the selected document.
@@ -45,6 +46,16 @@ struct RootView: View {
             }
             .environment(\.openDocument, OpenDocumentAction { linkedDocuments.append($0) })
         }
-        .onChange(of: selection) { linkedDocuments.removeAll() }
+        .onChange(of: selection) { old, new in
+            // Following a rename keeps the navigation history; choosing another note resets it.
+            if let move = store.lastMove, old?.movingPrefix(move.from, to: move.to) == new { return }
+            linkedDocuments.removeAll()
+        }
+        .onChange(of: store.lastMove) { _, move in
+            guard let move else { return }
+            linkedDocuments = linkedDocuments.map { $0.movingPrefix(move.from, to: move.to) ?? $0 }
+            folderStack = folderStack.map { FolderRoute(path: $0.path.movingPrefix(move.from, to: move.to) ?? $0.path) }
+            if let moved = selection?.movingPrefix(move.from, to: move.to) { selection = moved }
+        }
     }
 }

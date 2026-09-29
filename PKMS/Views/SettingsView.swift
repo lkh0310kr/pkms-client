@@ -72,19 +72,27 @@ private struct SyncStatusSection: View {
                     }
                 }
             }
-            if let report = sync.lastReport, report.changedVault || !report.conflicts.isEmpty || !report.localChanges.isEmpty {
-                if report.downloaded > 0 { LabeledContent("Updated", value: "\(report.downloaded) files") }
+            if !sync.isSignedIn, sync.hasLocalChanges {
+                Label("Sign in to save your edits to GitHub. They’re kept on this device until then.",
+                      systemImage: "icloud.slash")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if let report = sync.lastReport {
+                if report.uploaded > 0 { LabeledContent("Uploaded", value: "\(report.uploaded) files") }
+                if report.downloaded > 0 { LabeledContent("Downloaded", value: "\(report.downloaded) files") }
                 if report.deleted > 0 { LabeledContent("Removed", value: "\(report.deleted) files") }
-                if !report.localChanges.isEmpty {
-                    DisclosureGroup("Changed on this device (\(report.localChanges.count))") {
-                        ForEach(report.localChanges, id: \.self) { Text($0.string).font(.footnote) }
+                if !report.merged.isEmpty {
+                    DisclosureGroup("Combined edits from both places (\(report.merged.count))") {
+                        ForEach(report.merged, id: \.self) { Text($0.string).font(.footnote) }
                     }
                 }
-                if !report.conflicts.isEmpty {
-                    DisclosureGroup("Changed in both places (\(report.conflicts.count))") {
-                        Text("This device’s version was kept.").font(.footnote).foregroundStyle(.secondary)
-                        ForEach(report.conflicts, id: \.self) { Text($0.string).font(.footnote) }
-                    }
+            }
+            if !sync.conflicts.isEmpty {
+                DisclosureGroup("Needs review (\(sync.conflicts.count))") {
+                    Text("Edited in the same place on this device and on GitHub. Open the note to choose a version.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    ForEach(sync.conflicts.keys.sorted(), id: \.self) { Text($0.string).font(.footnote) }
                 }
             }
             Button("Sync Now") { Task { await sync.sync() } }

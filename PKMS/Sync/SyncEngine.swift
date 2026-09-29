@@ -6,6 +6,13 @@ protocol RemoteVault: Sendable {
     /// Blob SHA of every file at `commit`, keyed by vault path.
     func files(at commit: String) async throws -> [VaultPath: String]
     func download(sha: String) async throws -> Data
+    /// Commits `changes` (nil = delete) on top of `parent` and moves the branch to it.
+    /// Throws `RemoteVaultError.outdated` if the branch no longer points at `parent`.
+    func upload(_ changes: [VaultPath: Data?], parent: String, message: String) async throws -> String
+}
+
+enum RemoteVaultError: Error {
+    case outdated
 }
 
 struct GitHubRemote: RemoteVault {
@@ -32,18 +39,58 @@ struct GitHubRemote: RemoteVault {
     func download(sha: String) async throws -> Data {
         try await client.blob(of: repository, sha: sha)
     }
+
+    func upload(_ changes: [VaultPath: Data?], parent: String, message: String) async throws -> String {
+        var treeChanges: [GitHubClient.TreeChange] = []
+        for (path, data) in changes.sorted(by: { $0.key < $1.key }) {
+            let sha = try await data.asyncMap { try await client.createBlob(in: repository, content: $0) }
+            treeChanges.append(.init(path: path.string, sha: sha))
+        }
+        let baseTree = try await client.treeSHA(of: repository, commit: parent)
+        let tree = try await client.createTree(in: repository, base: baseTree, changes: treeChanges)
+        let commit = try await client.createCommit(in: repository, message: message, tree: tree, parent: parent)
+        do {
+            try await client.updateBranch(in: repository, branch: branch, to: commit)
+        } catch GitHubError.notFastForward {
+            throw RemoteVaultError.outdated
+        }
+        return commit
+    }
+}
+
+private extension Optional {
+    func asyncMap<T>(_ transform: (Wrapped) async throws -> T) async rethrows -> T? {
+        switch self {
+        case .some(let value): try await transform(value)
+        case .none: nil
+        }
+    }
 }
 
 /// What sync remembers between runs, stored outside the vault in `Application Support/Sync/state.json`.
 struct SyncState: Codable, Sendable {
     /// `owner/name@branch` the state belongs to.
     var repository: String
-    /// Last commit fully applied to the vault.
+    /// Last commit fully reflected in the vault.
     var commit: String?
     /// Blob SHA of each file as of the last sync: the "base" for detecting changes on either side.
     var files: [String: String] = [:]
+    /// Unresolved conflicts: note path → path of the saved GitHub version.
+    var conflicts: [String: String] = [:]
 
     static let fileURL = URL.applicationSupportDirectory.appending(path: "Sync/state.json")
+
+    init(repository: String) {
+        self.repository = repository
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        repository = try container.decode(String.self, forKey: .repository)
+        commit = try container.decodeIfPresent(String.self, forKey: .commit)
+        files = try container.decodeIfPresent([String: String].self, forKey: .files) ?? [:]
+        conflicts = try container.decodeIfPresent([String: String].self, forKey: .conflicts) ?? [:]
+    }
 
     static func load(from url: URL = fileURL) -> SyncState? {
         guard let data = try? Data(contentsOf: url) else { return nil }
@@ -59,13 +106,17 @@ struct SyncState: Codable, Sendable {
 }
 
 struct SyncReport: Sendable {
-    var commit: String
     var downloaded = 0
     var deleted = 0
-    var localChanges: [VaultPath] = []
+    var uploaded = 0
+    /// Notes changed on both sides whose edits were combined automatically.
+    var merged: [VaultPath] = []
+    /// Notes changed on both sides in the same place; GitHub's version was saved next to them.
     var conflicts: [VaultPath] = []
+    /// Local changes not uploaded because the user isn't signed in.
+    var notUploaded = 0
 
-    var changedVault: Bool { downloaded > 0 || deleted > 0 }
+    var changedVault: Bool { downloaded > 0 || deleted > 0 || !merged.isEmpty || !conflicts.isEmpty }
 }
 
 enum SyncEngineError: LocalizedError {
@@ -78,51 +129,89 @@ enum SyncEngineError: LocalizedError {
     }
 }
 
-/// Pulls a remote vault into the local vault directory.
+/// Two-way sync between the local vault directory and a remote.
 ///
-/// Files are only overwritten or deleted when they haven't changed locally since the last sync,
-/// so nothing edited on this device is ever lost. State is saved after every run, including
-/// failed ones, so an interrupted sync resumes where it stopped.
+/// Each run first brings in remote changes, then uploads local ones as a single commit.
+/// Nothing is ever lost: a file changed on both sides is merged when the edits don't overlap;
+/// otherwise the remote version is saved as a separate file for the user to review.
+/// State is saved as work completes, so an interrupted sync resumes where it stopped.
 struct SyncEngine: Sendable {
     let vaultRoot: URL
     let stateURL: URL
     let repositoryID: String
     let remote: any RemoteVault
+    var canUpload = true
+    /// First line of commit messages, e.g. "Update notes from iPhone".
+    var commitTitle = "Update notes"
 
     private static let maxConcurrentDownloads = 6
+    private static let mergeableExtensions: Set<String> = ["md", "markdown", "txt"]
 
-    func pull(progress: @escaping @Sendable (_ done: Int, _ total: Int) -> Void = { _, _ in }) async throws -> SyncReport {
+    func sync(progress: @escaping @Sendable (_ done: Int, _ total: Int) -> Void = { _, _ in }) async throws -> SyncReport {
+        var report = SyncReport()
+        // If someone else pushes between our pull and upload, pull again and retry.
+        for _ in 0..<3 {
+            do {
+                try await syncOnce(report: &report, progress: progress)
+                return report
+            } catch RemoteVaultError.outdated {
+                continue
+            }
+        }
+        throw GitHubError.notFastForward
+    }
+
+    private func syncOnce(report: inout SyncReport, progress: @escaping @Sendable (Int, Int) -> Void) async throws {
         var state = SyncState.load(from: stateURL).flatMap { $0.repository == repositoryID ? $0 : nil }
             ?? SyncState(repository: repositoryID)
-        let head = try await remote.headCommit()
-        var report = SyncReport(commit: head)
-        if state.commit == head { return report }
+        defer { try? state.save(to: stateURL) }
 
+        let head = try await remote.headCommit()
+        if state.commit != head {
+            try await pull(head: head, state: &state, report: &report, progress: progress)
+        }
+
+        let changes = localChanges(state: state)
+        guard !changes.isEmpty else { return }
+        guard canUpload else {
+            report.notUploaded = changes.count
+            return
+        }
+        let commit = try await remote.upload(changes, parent: head, message: commitMessage(for: changes, state: state))
+        for (path, data) in changes {
+            state.files[path.string] = data.map(GitBlobHash.of)
+        }
+        state.commit = commit
+        report.uploaded += changes.count
+    }
+
+    // MARK: - Pull
+
+    private func pull(head: String, state: inout SyncState, report: inout SyncReport,
+                      progress: @escaping @Sendable (Int, Int) -> Void) async throws {
         let remoteFiles = try await remote.files(at: head)
-        var base = Dictionary(uniqueKeysWithValues: state.files.map { (VaultPath($0.key), $0.value) })
+        let base = Dictionary(uniqueKeysWithValues: state.files.map { (VaultPath($0.key), $0.value) })
         let local = localHashes(for: Set(base.keys).union(remoteFiles.keys))
         let plan = SyncPlanner.plan(base: base, local: local, remote: remoteFiles)
 
-        defer {
-            state.files = Dictionary(uniqueKeysWithValues: base.map { ($0.key.string, $0.value) })
-            try? state.save(to: stateURL)
-        }
-
         var downloads: [(VaultPath, String)] = []
+        var merges: [(VaultPath, String)] = []
         for (path, action) in plan.sorted(by: { $0.key < $1.key }) {
             switch action {
             case .none:
-                base[path] = remoteFiles[path]
+                state.files[path.string] = remoteFiles[path]
             case .download(let sha):
                 downloads.append((path, sha))
             case .deleteLocal:
                 try deleteFile(at: path)
-                base[path] = nil
+                state.files[path.string] = nil
                 report.deleted += 1
-            case .keepLocalChange:
-                report.localChanges.append(path)
-            case .conflict:
-                report.conflicts.append(path)
+            case .upload:
+                break
+            case .restoreLocal:
+                state.files[path.string] = nil  // treated as a new file and uploaded again
+            case .merge(let sha):
+                merges.append((path, sha))
             }
         }
 
@@ -132,26 +221,108 @@ struct SyncEngine: Sendable {
             func enqueue() {
                 guard let (path, sha) = pending.next() else { return }
                 group.addTask {
-                    let data = try await remote.download(sha: sha)
-                    guard GitBlobHash.of(data) == sha else { throw SyncEngineError.corruptDownload(path) }
+                    let data = try await download(sha: sha, for: path)
                     try writeFile(data, at: path)
                     return (path, sha)
                 }
             }
             for _ in 0..<Self.maxConcurrentDownloads { enqueue() }
             for try await (path, sha) in group {
-                base[path] = sha
+                state.files[path.string] = sha
                 report.downloaded += 1
                 progress(report.downloaded, downloads.count)
                 enqueue()
             }
         }
 
+        for (path, remoteSHA) in merges {
+            let remoteData = try await download(sha: remoteSHA, for: path)
+            if let merged = try await mergedText(at: path, remote: remoteData, baseSHA: base[path]) {
+                try writeFile(Data(merged.utf8), at: path)
+                report.merged.append(path)
+            } else {
+                let copy = conflictCopyPath(for: path)
+                try writeFile(remoteData, at: copy)
+                state.conflicts[path.string] = copy.string
+                report.conflicts.append(path)
+            }
+            // The remote version is now accounted for; what's on disk is uploaded as a local change.
+            state.files[path.string] = remoteSHA
+        }
+
         state.commit = head
-        return report
     }
 
-    // MARK: - Local files
+    private func download(sha: String, for path: VaultPath) async throws -> Data {
+        let data = try await remote.download(sha: sha)
+        guard GitBlobHash.of(data) == sha else { throw SyncEngineError.corruptDownload(path) }
+        return data
+    }
+
+    private func mergedText(at path: VaultPath, remote remoteData: Data, baseSHA: String?) async throws -> String? {
+        guard Self.mergeableExtensions.contains(path.pathExtension),
+              let localData = try? Data(contentsOf: url(for: path)),
+              let local = String(data: localData, encoding: .utf8),
+              let remote = String(data: remoteData, encoding: .utf8) else { return nil }
+        let base = try await baseSHA.asyncMap { String(decoding: try await download(sha: $0, for: path), as: UTF8.self) } ?? ""
+        return TextMerge.merge(base: base, local: local, remote: remote)
+    }
+
+    /// "Note (GitHub version).md", numbered if that name is taken.
+    private func conflictCopyPath(for path: VaultPath) -> VaultPath {
+        let ext = path.pathExtension.isEmpty ? "" : "." + path.pathExtension
+        var n = 1
+        while true {
+            let suffix = n == 1 ? " (GitHub version)" : " (GitHub version \(n))"
+            let candidate = path.parent.appending(path.baseName + suffix + ext)
+            if !FileManager.default.fileExists(atPath: url(for: candidate).path(percentEncoded: false)) { return candidate }
+            n += 1
+        }
+    }
+
+    // MARK: - Local changes
+
+    /// Files added, edited or deleted on this device since the last sync (nil = deleted).
+    /// Unresolved conflicts are held back until the user decides.
+    private func localChanges(state: SyncState) -> [VaultPath: Data?] {
+        let held = Set(state.conflicts.keys).union(state.conflicts.values)
+        var changes: [VaultPath: Data?] = [:]
+        var seen = Set<String>()
+        for path in allLocalFiles() where !held.contains(path.string) {
+            seen.insert(path.string)
+            guard let data = try? Data(contentsOf: url(for: path)) else { continue }
+            if state.files[path.string] != GitBlobHash.of(data) { changes[path] = .some(data) }
+        }
+        for path in state.files.keys where !seen.contains(path) && !held.contains(path) {
+            changes[VaultPath(path)] = .some(nil)
+        }
+        return changes
+    }
+
+    private func commitMessage(for changes: [VaultPath: Data?], state: SyncState) -> String {
+        let lines = changes.keys.sorted().map { path -> String in
+            let verb = changes[path]! == nil ? "Delete" : (state.files[path.string] == nil ? "Add" : "Edit")
+            return "\(verb) \(path.string)"
+        }
+        let shown = lines.prefix(20) + (lines.count > 20 ? ["…and \(lines.count - 20) more"] : [])
+        return commitTitle + "\n\n" + shown.joined(separator: "\n")
+    }
+
+    private func allLocalFiles() -> [VaultPath] {
+        let root = vaultRoot.resolvingSymlinksInPath()
+        guard let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return [] }
+        var paths: [VaultPath] = []
+        let rootCount = root.pathComponents.count
+        for case let url as URL in enumerator {
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+            paths.append(VaultPath(components: Array(url.resolvingSymlinksInPath().pathComponents.dropFirst(rootCount))))
+        }
+        return paths
+    }
+
+    // MARK: - Files
 
     private func url(for path: VaultPath) -> URL {
         path.components.reduce(vaultRoot) { $0.appending(path: $1, directoryHint: .notDirectory) }
@@ -185,5 +356,31 @@ struct SyncEngine: Sendable {
             try fm.removeItem(at: folderURL)
             folder = folder.parent
         }
+    }
+
+    // MARK: - Conflicts
+
+    enum Resolution {
+        /// Keep this device's version and discard GitHub's.
+        case keepLocal
+        /// Replace this device's version with GitHub's.
+        case keepRemote
+        /// Keep both as separate notes.
+        case keepBoth
+    }
+
+    /// Applies the user's choice for a conflict. The next sync uploads the result.
+    func resolveConflict(_ path: VaultPath, _ resolution: Resolution) throws {
+        guard var state = SyncState.load(from: stateURL), let copy = state.conflicts[path.string].map(VaultPath.init) else { return }
+        switch resolution {
+        case .keepLocal:
+            try? FileManager.default.removeItem(at: url(for: copy))
+        case .keepRemote:
+            _ = try FileManager.default.replaceItemAt(url(for: path), withItemAt: url(for: copy))
+        case .keepBoth:
+            break
+        }
+        state.conflicts[path.string] = nil
+        try state.save(to: stateURL)
     }
 }

@@ -7,6 +7,8 @@ import Foundation
 /// `link` attributes only, so the model stays UI-framework-free.
 struct MarkdownDocument: Sendable {
     var blocks: [MarkdownBlock]
+    /// Lines of front matter removed before parsing; add to a block's `sourceLine` to get the file line.
+    var lineOffset = 0
 
     /// Text of the first level-1 heading, if any.
     var title: String? {
@@ -33,6 +35,8 @@ struct MarkdownList: Hashable, Sendable {
         /// `nil` for normal items, `true`/`false` for GFM task list items.
         var checkbox: Bool?
         var blocks: [MarkdownBlock]
+        /// 0-based line of the item in the parsed text, used to toggle checkboxes in place.
+        var sourceLine: Int?
     }
 
     var isOrdered: Bool

@@ -8,19 +8,20 @@ import Markdown
 /// only maps that syntax tree onto the app's smaller render model.
 enum MarkdownParser {
     static func parse(_ text: String) -> MarkdownDocument {
-        let source = preprocessWikiLinks(stripFrontMatter(text))
-        let document = Document(parsing: source)
-        return MarkdownDocument(blocks: blocks(from: document.children))
+        let frontMatter = frontMatterLineCount(text)
+        let body = text.components(separatedBy: "\n").dropFirst(frontMatter).joined(separator: "\n")
+        let document = Document(parsing: preprocessWikiLinks(body))
+        return MarkdownDocument(blocks: blocks(from: document.children), lineOffset: frontMatter)
     }
 
     // MARK: - Preprocessing
 
-    /// Removes a leading YAML front matter block (`---` … `---`), common in Obsidian vaults.
-    static func stripFrontMatter(_ text: String) -> String {
-        guard text.hasPrefix("---\n") || text.hasPrefix("---\r\n") else { return text }
-        let lines = text.components(separatedBy: .newlines)
-        guard let end = lines.dropFirst().firstIndex(where: { $0 == "---" || $0 == "..." }) else { return text }
-        return lines[(end + 1)...].joined(separator: "\n")
+    /// Number of lines taken by a leading YAML front matter block (`---` … `---`), common in Obsidian vaults.
+    static func frontMatterLineCount(_ text: String) -> Int {
+        guard text.hasPrefix("---\n") || text.hasPrefix("---\r\n") else { return 0 }
+        let lines = text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces.union(.newlines)) }
+        guard let end = lines.dropFirst().firstIndex(where: { $0 == "---" || $0 == "..." }) else { return 0 }
+        return end + 1
     }
 
     // Matches an inline code span (group 1, left untouched) or a wiki link:
@@ -136,7 +137,8 @@ enum MarkdownParser {
             case .unchecked: false
             case nil: nil
             }
-            return MarkdownList.Item(checkbox: checkbox, blocks: blocks(from: item.children))
+            let line = item.range.map { $0.lowerBound.line - 1 }
+            return MarkdownList.Item(checkbox: checkbox, blocks: blocks(from: item.children), sourceLine: line)
         }
     }
 

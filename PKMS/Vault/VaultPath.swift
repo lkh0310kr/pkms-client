@@ -46,6 +46,17 @@ struct VaultPath: Hashable, Sendable, Comparable, CustomStringConvertible {
         VaultPath(components.isEmpty ? string : self.string + "/" + string)
     }
 
+    /// Whether this path is `other` or inside it.
+    func hasPrefix(_ other: VaultPath) -> Bool {
+        components.starts(with: other.components)
+    }
+
+    /// Rewrites this path after `old` was moved to `new`, or returns `nil` if it isn't affected.
+    func movingPrefix(_ old: VaultPath, to new: VaultPath) -> VaultPath? {
+        guard hasPrefix(old) else { return nil }
+        return VaultPath(components: new.components + components.dropFirst(old.components.count))
+    }
+
     var isMarkdown: Bool { ["md", "markdown"].contains(pathExtension) }
 
     static func < (lhs: VaultPath, rhs: VaultPath) -> Bool {

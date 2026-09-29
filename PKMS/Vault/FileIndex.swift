@@ -20,12 +20,13 @@ struct VaultNode: Identifiable, Hashable, Sendable {
 
     var isFolder: Bool { kind == .folder }
 
-    /// True if this node is or contains at least one Markdown document.
-    var containsMarkdown: Bool {
+    /// Whether the node appears in the file browser: documents, and folders that are empty
+    /// or contain documents. Asset-only folders (e.g. `Assets/`) are hidden.
+    var isBrowsable: Bool {
         switch kind {
         case .markdown: true
         case .asset: false
-        case .folder: children.contains { $0.containsMarkdown }
+        case .folder: children.isEmpty || children.contains { $0.isBrowsable }
         }
     }
 }
