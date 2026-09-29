@@ -291,12 +291,21 @@ struct SyncEngine: Sendable {
         for path in allLocalFiles() where !held.contains(path.string) {
             seen.insert(path.string)
             guard let data = try? Data(contentsOf: url(for: path)) else { continue }
-            if state.files[path.string] != GitBlobHash.of(data) { changes[path] = .some(data) }
+            if state.files[path.string] != GitBlobHash.of(data) { changes[remoteSpelling(of: path, state: state)] = .some(data) }
         }
         for path in state.files.keys where !seen.contains(path) && !held.contains(path) {
             changes[VaultPath(path)] = .some(nil)
         }
         return changes
+    }
+
+    /// The path to upload a local file under. File systems may spell a name in a different Unicode
+    /// normalization than the repository (Korean names written on macOS are decomposed, iOS reports them
+    /// composed). Swift compares the two as equal but git doesn't, so reusing the repository's spelling
+    /// keeps an edit from turning into a second, identical-looking file. New files are uploaded composed (NFC).
+    func remoteSpelling(of path: VaultPath, state: SyncState) -> VaultPath {
+        if let index = state.files.index(forKey: path.string) { return VaultPath(state.files[index].key) }
+        return VaultPath(path.string.precomposedStringWithCanonicalMapping)
     }
 
     private func commitMessage(for changes: [VaultPath: Data?], state: SyncState) -> String {

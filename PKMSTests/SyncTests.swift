@@ -235,6 +235,26 @@ struct SyncEngineTests {
         #expect(remote.files["a.md"] == "A edited")
     }
 
+    @Test func uploadsUnderTheRepositorysUnicodeSpelling() {
+        let decomposed = "중국 소싱.md".decomposedStringWithCanonicalMapping   // as written by macOS
+        let composed = "중국 소싱.md".precomposedStringWithCanonicalMapping    // as iOS reports it
+        var state = SyncState(repository: "me/notes@main")
+        state.files[decomposed] = "sha"
+        // The file system hands back the composed name; the upload must reuse the repository's spelling.
+        let path = engine().remoteSpelling(of: VaultPath(composed), state: state)
+        #expect(path.string.utf8.elementsEqual(decomposed.utf8), "must edit the existing file, not add a second one")
+    }
+
+    @Test func newFilesUploadComposed() async throws {
+        defer { cleanUp() }
+        remote.files = [:]
+        _ = try await engine().sync()
+        try write("노트.md".decomposedStringWithCanonicalMapping, "x")
+        _ = try await engine().sync()
+        let uploaded = try #require(remote.uploads.last?.keys.first)
+        #expect(uploaded.utf8.elementsEqual("노트.md".precomposedStringWithCanonicalMapping.utf8))
+    }
+
     @Test func retriesWhenRemoteMovesDuringUpload() async throws {
         defer { cleanUp() }
         remote.files = ["a.md": "A", "b.md": "B"]
