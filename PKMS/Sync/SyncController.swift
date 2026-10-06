@@ -77,6 +77,8 @@ final class SyncController {
         token = credentials.accessToken
         accountName = user.login
         defaults.set(user.login, forKey: Key.account)
+        // Authorization alone does not install the app, so private repositories stay hidden until it is.
+        needsAppInstall = await client.hasAppInstallation() == false
     }
 
     func signIn(token: String) async throws {
@@ -88,6 +90,7 @@ final class SyncController {
         let ticket = accountTicket
         token = nil
         accountName = nil
+        needsAppInstall = false
         defaults.removeObject(forKey: Key.account)
         Task { await account.clear(ticket: ticket) }
     }

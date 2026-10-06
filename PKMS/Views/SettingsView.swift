@@ -178,6 +178,7 @@ private struct SignInView: View {
                 deviceCode = code
                 let credentials = try await flow.waitForToken(code)
                 try await sync.signIn(credentials)
+                openInstallPageIfNeeded()
             } catch is CancellationError {
             } catch {
                 self.error = error.localizedDescription
@@ -197,9 +198,15 @@ private struct SignInView: View {
         do {
             try await sync.signIn(token: token)
             error = nil
+            openInstallPageIfNeeded()
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    private func openInstallPageIfNeeded() {
+        guard sync.needsAppInstall else { return }
+        openURL(GitHubAppConfig.installURL)
     }
 }
 
