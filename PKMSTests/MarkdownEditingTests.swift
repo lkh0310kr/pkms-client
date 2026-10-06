@@ -48,6 +48,26 @@ struct MarkdownEditingTests {
         #expect(result == "- a\n- ")
     }
 
+    @Test func backspaceAtContentStartRemovesMarkerOrOutdents() {
+        var (result, sel) = apply(MarkdownEditing.backspaceKey(in: "- [ ] ", selection: caret(6))!, to: "- [ ] ")
+        #expect(result == "" && sel == caret(0))
+
+        (result, sel) = apply(MarkdownEditing.backspaceKey(in: "- text", selection: caret(2))!, to: "- text")
+        #expect(result == "text" && sel == caret(0))
+
+        (result, sel) = apply(MarkdownEditing.backspaceKey(in: "# Title", selection: caret(2))!, to: "# Title")
+        #expect(result == "Title" && sel == caret(0))
+
+        let nested = "- a\n  - "
+        (result, sel) = apply(MarkdownEditing.backspaceKey(in: nested, selection: caret(8))!, to: nested)
+        #expect(result == "- a\n- " && sel == caret(6))
+
+        // Inside the text, or with a selection, backspace is just backspace.
+        #expect(MarkdownEditing.backspaceKey(in: "- text", selection: caret(4)) == nil)
+        #expect(MarkdownEditing.backspaceKey(in: "- text", selection: NSRange(location: 2, length: 2)) == nil)
+        #expect(MarkdownEditing.backspaceKey(in: "plain", selection: caret(0)) == nil)
+    }
+
     @Test func indentNestsUnderParentItem() {
         let text = "1. a\n1. b"
         let (result, _) = apply(MarkdownEditing.indent(in: text, selection: caret(9)), to: text)

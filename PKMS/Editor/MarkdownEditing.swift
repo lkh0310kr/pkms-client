@@ -166,6 +166,24 @@ enum MarkdownEditing {
                         selection: NSRange(location: selection.location + insertion.utf16.count, length: 0))
     }
 
+    /// Notion-style delete at the start of a block's content. A nested list item outdents; any other
+    /// marker (bullet, checkbox, number, heading, quote) is removed so the line becomes plain text.
+    /// Returns `nil` for an ordinary backspace.
+    static func backspaceKey(in text: String, selection: NSRange) -> TextEdit? {
+        guard selection.length == 0 else { return nil }
+        let ns = text as NSString
+        let line = lineRange(in: ns, for: selection)
+        let linePrefix = prefix(of: ns.substring(with: line))
+        guard !linePrefix.marker.isEmpty, selection.location == line.location + linePrefix.length else { return nil }
+        let prefixRange = NSRange(location: line.location, length: linePrefix.length)
+        if linePrefix.isList, !linePrefix.indent.isEmpty {
+            let replacement = outdented(linePrefix.indent, in: ns, before: line.location) + linePrefix.marker
+            return TextEdit(range: prefixRange, replacement: replacement,
+                            selection: NSRange(location: line.location + replacement.utf16.count, length: 0))
+        }
+        return TextEdit(range: prefixRange, replacement: "", selection: NSRange(location: line.location, length: 0))
+    }
+
     private static func continuedMarker(_ marker: String) -> String {
         if marker.contains("[") { return String(marker.prefix(1)) + " [ ] " }
         if let first = marker.first, first.isNumber {
