@@ -59,42 +59,57 @@ final class MarkdownHighlighter {
     // MARK: - Styling
 
     /// Restyles the lines around `editedRange` (or everything). `selection` is nil when the editor
-    /// isn't focused, which renders every line.
-    func highlight(_ storage: NSTextStorage, editedRange: NSRange?, selection: NSRange?, isProcessingEdit: Bool) {
+    /// isn't focused, which renders every line. Returns the character range that was restyled.
+    @discardableResult
+    func highlight(_ storage: NSTextStorage, editedRange: NSRange?, selection: NSRange?, isProcessingEdit: Bool) -> NSRange {
         let text = storage.string as NSString
         let full = NSRange(location: 0, length: text.length)
         let blocks = blockRanges(in: text)
         var range = full
-        if let editedRange {
+        if var editedRange {
+            // A newline belongs to the previous paragraph. Step back so that line is restyled too,
+            // not only the line the cursor landed on.
+            if editedRange.location > 0 {
+                editedRange.location -= 1
+                editedRange.length += 1
+            }
+            let next = NSMaxRange(editedRange)
+            if next < text.length { editedRange.length += 1 }
             range = text.paragraphRange(for: NSIntersectionRange(editedRange, full))
             for block in blocks.code + blocks.tables where NSIntersectionRange(block, range).length > 0 || NSLocationInRange(range.location, block) {
                 range = NSUnionRange(range, block)
             }
         }
+        guard range.length > 0 else { return range }
         if !isProcessingEdit { storage.beginEditing() }
         style(storage, range: range, selection: selection, blocks: blocks)
         if !isProcessingEdit { storage.endEditing() }
+        return range
     }
 
-    /// Restyles just the lines the selection moved between.
-    func selectionChanged(_ storage: NSTextStorage, from old: NSRange?, to new: NSRange?) {
+    /// Restyles just the lines the selection moved between. Returns the character range that was restyled.
+    @discardableResult
+    func selectionChanged(_ storage: NSTextStorage, from old: NSRange?, to new: NSRange?) -> NSRange {
         let text = storage.string as NSString
         let full = NSRange(location: 0, length: text.length)
         var ranges: [NSRange] = []
         for sel in [old, new].compactMap({ $0 }) where NSMaxRange(sel) <= full.length {
-            ranges.append(text.paragraphRange(for: sel))
+            let paragraph = text.paragraphRange(for: sel)
+            if !ranges.contains(where: { NSEqualRanges($0, paragraph) }) { ranges.append(paragraph) }
         }
-        if old == nil || new == nil { ranges = [full] }  // focus changed: everything reveals or renders
-        guard !ranges.isEmpty else { return }
+        guard !ranges.isEmpty else { return NSRange(location: 0, length: 0) }
         storage.beginEditing()
         let blocks = blockRanges(in: text)
+        var union = NSRange(location: NSNotFound, length: 0)
         for var range in ranges {
             for block in blocks.code + blocks.tables where NSIntersectionRange(block, range).length > 0 {
                 range = NSUnionRange(range, block)
             }
             style(storage, range: range, selection: new, blocks: blocks)
+            union = union.location == NSNotFound ? range : NSUnionRange(union, range)
         }
         storage.endEditing()
+        return union.location == NSNotFound ? NSRange(location: 0, length: 0) : union
     }
 
     private func style(_ storage: NSTextStorage, range: NSRange, selection: NSRange?, blocks: (code: [NSRange], tables: [NSRange])) {
@@ -107,13 +122,8 @@ final class MarkdownHighlighter {
                 || (selection.location >= r.location && selection.location <= NSMaxRange(r))
         }
         /// Syntax: dimmed while its line is edited, hidden otherwise.
-        func syntax(_ r: NSRange, active: Bool) {
-            guard r.location != NSNotFound, r.length > 0 else { return }
-            if active {
-                storage.addAttribute(.foregroundColor, value: UIColor.tertiaryLabel, range: r)
-            } else {
-                storage.addAttribute(.mdHidden, value: true, range: r)
-            }
+        func syntax(_ r: NSRange, active: Bool, line: NSRange, font: UIFont) {
+            hideSyntax(storage, range: r, active: active, line: line, font: font, in: text)
         }
 
         // Front matter: small and quiet.
@@ -128,7 +138,7 @@ final class MarkdownHighlighter {
             storage.addAttributes([.font: mono, .mdDecoration: MarkdownDecoration(.codeBlock)], range: block)
             fence.enumerateMatches(in: storage.string, range: block) { m, _, _ in
                 guard let m else { return }
-                syntax(m.range, active: active)
+                syntax(m.range, active: active, line: text.paragraphRange(for: m.range), font: mono)
                 if !active {
                     // A hidden fence line becomes a little padding inside the block instead of a full blank line.
                     storage.addAttribute(.paragraphStyle, value: self.paragraph(minHeight: 6, maxHeight: 6, spacing: 0),
@@ -152,12 +162,12 @@ final class MarkdownHighlighter {
         let skip = blocks.code + blocks.tables
         text.enumerateSubstrings(in: range, options: [.byParagraphs, .substringNotRequired]) { _, lineRange, _, _ in
             guard !skip.contains(where: { NSIntersectionRange($0, lineRange).length > 0 || NSLocationInRange(lineRange.location, $0) }) else { return }
-            self.styleLine(storage, lineRange, active: touches(lineRange), selection: selection, syntax: syntax, touches: touches)
+            self.styleLine(storage, lineRange, active: touches(lineRange), selection: selection, touches: touches)
         }
     }
 
     private func styleLine(_ storage: NSTextStorage, _ line: NSRange, active: Bool, selection: NSRange?,
-                           syntax: (NSRange, Bool) -> Void, touches: (NSRange) -> Bool) {
+                           touches: (NSRange) -> Bool) {
         let string = storage.string
         let text = string as NSString
         func first(_ regex: NSRegularExpression) -> NSTextCheckingResult? { regex.firstMatch(in: string, range: line) }
@@ -195,88 +205,93 @@ final class MarkdownHighlighter {
 
         if let m = first(heading) {
             let level = m.range(at: 1).length - (text.substring(with: m.range(at: 1)).filter { $0 == " " || $0 == "\t" }.count)
-            storage.addAttributes([.font: headingFont(level), .paragraphStyle: paragraph(spacing: 8)], range: line)
-            syntax(m.range(at: 1), active)
+            let font = headingFont(level)
+            storage.addAttributes([.font: font, .paragraphStyle: paragraph(spacing: 8)], range: line)
+            hideSyntax(storage, range: m.range(at: 1), active: active, line: line, font: font, in: text)
         }
 
         if let m = first(quote) {
-            syntax(m.range(at: 1), active)
+            hideSyntax(storage, range: m.range(at: 1), active: active, line: line, font: body, in: text)
             storage.addAttributes([.foregroundColor: UIColor.secondaryLabel, .paragraphStyle: paragraph(indent: 14),
                                    .mdDecoration: MarkdownDecoration(.quoteBar)], range: line)
         }
 
+        // List items: the raw prefix (indent + marker) is hidden and every kind of item gets the same
+        // fixed gutter, so bullets, checkboxes and numbers line up like Notion's. The prefix shows
+        // only while the cursor is inside it, which is how you edit the marker itself.
+        func listItem(prefixEnd: Int, indent: NSRange, marker: NSRange, decoration: MarkdownDecoration, revealColor: UIColor) {
+            let prefixRange = NSRange(location: line.location, length: prefixEnd - line.location)
+            let revealed = selection.map { sel in
+                NSIntersectionRange(sel, prefixRange).length > 0 || (sel.location >= line.location && sel.location < prefixEnd)
+            } ?? false
+            if revealed {
+                storage.addAttribute(.foregroundColor, value: revealColor, range: marker)
+                let hang = width(of: indent, font: body) + width(of: NSRange(location: marker.location, length: prefixEnd - marker.location), font: body)
+                storage.addAttribute(.paragraphStyle, value: paragraph(head: hang, spacing: 4), range: line)
+            } else {
+                collapseHidden(storage, range: prefixRange, font: body, in: text)
+                storage.addAttribute(.mdDecoration, value: decoration, range: marker)
+                let head = LivePreviewMetrics.nestOffset(forIndent: text.substring(with: indent)) + LivePreviewMetrics.listGutter
+                storage.addAttribute(.paragraphStyle, value: paragraph(indent: head, spacing: 4), range: line)
+            }
+        }
+
         if let m = first(task) {
             let marker = NSRange(location: m.range(at: 2).location, length: NSMaxRange(m.range(at: 3)) - m.range(at: 2).location)
-            // Show the raw marker only while the cursor is inside it, so typing an item keeps its checkbox.
-            let revealed = selection.map { NSIntersectionRange($0, marker).length > 0 || ($0.location > marker.location && $0.location < NSMaxRange(marker)) } ?? false
             let checked = text.substring(with: m.range(at: 4)) != " "
-            if revealed {
-                storage.addAttribute(.foregroundColor, value: UIColor.tertiaryLabel, range: marker)
-            } else {
-                // The marker stays laid out (just invisible) and the box is drawn over it. Hiding glyphs at
-                // the start of a paragraph makes TextKit treat its first line as a wrapped one.
-                storage.addAttributes([.foregroundColor: UIColor.clear, .mdDecoration: MarkdownDecoration(.checkbox(checked: checked))],
-                                      range: marker)
-            }
             let contentStart = NSMaxRange(m.range(at: 5))
+            listItem(prefixEnd: contentStart, indent: m.range(at: 1), marker: marker,
+                     decoration: MarkdownDecoration(.checkbox(checked: checked)), revealColor: .tertiaryLabel)
             if checked, contentStart < NSMaxRange(line) {
                 storage.addAttributes([.foregroundColor: UIColor.secondaryLabel, .strikethroughStyle: NSUnderlineStyle.single.rawValue],
                                       range: NSRange(location: contentStart, length: NSMaxRange(line) - contentStart))
             }
-            let indent = width(of: m.range(at: 1), font: body)
-            let hang = width(of: NSRange(location: m.range(at: 2).location, length: contentStart - m.range(at: 2).location), font: body)
-            storage.addAttribute(.paragraphStyle, value: paragraph(head: indent + hang, spacing: 4), range: line)
         } else if let m = first(bullet) {
-            let marker = m.range(at: 2)
-            let revealed = selection.map { $0.location == marker.location && touches(marker) } ?? false
-            if revealed {
-                storage.addAttribute(.foregroundColor, value: UIColor.tertiaryLabel, range: marker)
-            } else {
-                storage.addAttributes([.foregroundColor: UIColor.clear, .mdDecoration: MarkdownDecoration(.bullet)], range: marker)
-            }
-            let hang = width(of: m.range(at: 1), font: body) + width(of: NSUnionRange(marker, m.range(at: 3)), font: body)
-            storage.addAttribute(.paragraphStyle, value: paragraph(head: hang, spacing: 4), range: line)
+            listItem(prefixEnd: NSMaxRange(m.range(at: 3)), indent: m.range(at: 1), marker: m.range(at: 2),
+                     decoration: MarkdownDecoration(.bullet), revealColor: .tertiaryLabel)
         } else if let m = first(ordered) {
-            storage.addAttribute(.foregroundColor, value: UIColor.secondaryLabel, range: m.range(at: 2))
-            let hang = width(of: m.range(at: 1), font: body) + width(of: m.range(at: 2), font: body)
-            storage.addAttribute(.paragraphStyle, value: paragraph(head: hang, spacing: 4), range: line)
+            let label = text.substring(with: m.range(at: 2)).trimmingCharacters(in: .whitespaces)
+            listItem(prefixEnd: NSMaxRange(m.range(at: 2)), indent: m.range(at: 1), marker: m.range(at: 2),
+                     decoration: MarkdownDecoration(.number(label)), revealColor: .secondaryLabel)
         }
 
         // Inline syntax.
         each(code) { m in
             storage.addAttributes([.font: mono, .backgroundColor: UIColor.secondarySystemFill], range: m.range(at: 2))
-            syntax(m.range(at: 1), active)
-            syntax(NSRange(location: NSMaxRange(m.range) - m.range(at: 1).length, length: m.range(at: 1).length), active)
+            hideSyntax(storage, range: m.range(at: 1), active: active, line: line, font: mono, in: text)
+            hideSyntax(storage, range: NSRange(location: NSMaxRange(m.range) - m.range(at: 1).length, length: m.range(at: 1).length),
+                       active: active, line: line, font: mono, in: text)
         }
         var emphasized: [NSRange] = []
         each(boldItalic) { m in
             emphasized.append(m.range)
             addTraits([.traitBold, .traitItalic], storage, m.range(at: 2))
-            syntax(m.range(at: 1), active)
-            syntax(NSRange(location: NSMaxRange(m.range) - 3, length: 3), active)
+            hideSyntax(storage, range: m.range(at: 1), active: active, line: line, font: body, in: text)
+            hideSyntax(storage, range: NSRange(location: NSMaxRange(m.range) - 3, length: 3), active: active, line: line, font: body, in: text)
         }
         func insideEmphasis(_ r: NSRange) -> Bool { emphasized.contains { NSIntersectionRange($0, r).length > 0 } }
         each(bold) { m in
             guard !insideEmphasis(m.range) else { return }
             addTraits(.traitBold, storage, m.range(at: 2))
-            syntax(m.range(at: 1), active)
-            syntax(NSRange(location: NSMaxRange(m.range) - m.range(at: 1).length, length: m.range(at: 1).length), active)
+            hideSyntax(storage, range: m.range(at: 1), active: active, line: line, font: body, in: text)
+            hideSyntax(storage, range: NSRange(location: NSMaxRange(m.range) - m.range(at: 1).length, length: m.range(at: 1).length),
+                       active: active, line: line, font: body, in: text)
         }
         each(italic) { m in
             guard !insideEmphasis(m.range) else { return }
             addTraits(.traitItalic, storage, m.range(at: 2))
-            syntax(m.range(at: 1), active)
-            syntax(NSRange(location: NSMaxRange(m.range) - 1, length: 1), active)
+            hideSyntax(storage, range: m.range(at: 1), active: active, line: line, font: body, in: text)
+            hideSyntax(storage, range: NSRange(location: NSMaxRange(m.range) - 1, length: 1), active: active, line: line, font: body, in: text)
         }
         each(strike) { m in
             storage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: m.range(at: 2))
-            syntax(NSRange(location: m.range.location, length: 2), active)
-            syntax(NSRange(location: NSMaxRange(m.range) - 2, length: 2), active)
+            hideSyntax(storage, range: NSRange(location: m.range.location, length: 2), active: active, line: line, font: body, in: text)
+            hideSyntax(storage, range: NSRange(location: NSMaxRange(m.range) - 2, length: 2), active: active, line: line, font: body, in: text)
         }
         each(link) { m in
             storage.addAttributes([.foregroundColor: UIColor.tintColor, .mdLink: text.substring(with: m.range(at: 4))], range: m.range(at: 2))
-            syntax(m.range(at: 1), active)
-            syntax(m.range(at: 3), active)
+            hideSyntax(storage, range: m.range(at: 1), active: active, line: line, font: body, in: text)
+            hideSyntax(storage, range: m.range(at: 3), active: active, line: line, font: body, in: text)
         }
         each(wikiLink) { m in
             let target = m.range(at: 2).location != NSNotFound ? text.substring(with: m.range(at: 2)) : text.substring(with: m.range(at: 3))
@@ -284,12 +299,13 @@ final class MarkdownHighlighter {
             let opening = m.range(at: 2).location != NSNotFound
                 ? NSRange(location: m.range.location, length: m.range(at: 3).location - m.range.location)
                 : m.range(at: 1)
-            syntax(opening, active)
-            syntax(m.range(at: 4), active)
+            hideSyntax(storage, range: opening, active: active, line: line, font: body, in: text)
+            hideSyntax(storage, range: m.range(at: 4), active: active, line: line, font: body, in: text)
         }
         each(bareURL) { m in
             guard storage.attribute(.mdLink, at: m.range.location, effectiveRange: nil) == nil,
-                  storage.attribute(.mdHidden, at: m.range.location, effectiveRange: nil) == nil else { return }
+                  storage.attribute(.mdHidden, at: m.range.location, effectiveRange: nil) == nil,
+                  storage.attribute(.mdCollapsed, at: m.range.location, effectiveRange: nil) == nil else { return }
             storage.addAttributes([.foregroundColor: UIColor.tintColor, .mdLink: text.substring(with: m.range)], range: m.range)
         }
     }
@@ -369,6 +385,36 @@ final class MarkdownHighlighter {
         let lines = (text as String).components(separatedBy: "\n")
         guard let end = lines.dropFirst().firstIndex(of: "---") else { return nil }
         return lines[...end].reduce(0) { $0 + ($1 as NSString).length + 1 }
+    }
+
+    private func glyphWidth(_ range: NSRange, font: UIFont, in text: NSString) -> CGFloat {
+        (text.substring(with: range) as NSString).size(withAttributes: [.font: font]).width
+    }
+
+    /// Hides syntax without turning paragraph-start glyphs null, which would wrap the line.
+    private func collapseHidden(_ storage: NSTextStorage, range: NSRange, font: UIFont, in text: NSString) {
+        guard range.length > 0 else { return }
+        storage.addAttributes([.foregroundColor: UIColor.clear, .mdCollapsed: true], range: range)
+        var location = range.location
+        while location < NSMaxRange(range) {
+            let character = NSRange(location: location, length: 1)
+            storage.addAttribute(.kern, value: -glyphWidth(character, font: font, in: text), range: character)
+            location += 1
+        }
+    }
+
+    private func hideSyntax(_ storage: NSTextStorage, range: NSRange, active: Bool, line: NSRange, font: UIFont, in text: NSString) {
+        guard range.location != NSNotFound, range.length > 0 else { return }
+        if active {
+            storage.addAttribute(.foregroundColor, value: UIColor.tertiaryLabel, range: range)
+            return
+        }
+        let lineStart = NSRange(location: line.location, length: 1)
+        if NSIntersectionRange(range, lineStart).length > 0 {
+            collapseHidden(storage, range: range, font: font, in: text)
+        } else {
+            storage.addAttribute(.mdHidden, value: true, range: range)
+        }
     }
 
     private func headingFont(_ level: Int) -> UIFont {

@@ -252,6 +252,11 @@ struct MarkdownEditorView: UIViewRepresentable {
         /// Selection used for the last styling pass (nil = not editing, everything rendered).
         private var styledSelection: NSRange?
         private var pendingTap: (() -> Void)?
+        /// Lines whose glyphs must be rebuilt after the current edit. TextKit ignores custom
+        /// hide-attributes changed inside `didProcessEditing`, so the line stays blank until
+        /// something else (selecting it again) forces a new layout.
+        private var pendingLayoutRange: NSRange?
+        private var layoutRefreshScheduled = false
 
         init(controller: EditorController, widgets: WidgetCache) {
             self.controller = controller
@@ -275,7 +280,8 @@ struct MarkdownEditorView: UIViewRepresentable {
             let caret = NSRange(location: min(NSMaxRange(editedRange), storage.length), length: 0)
             let selection: NSRange? = textView.isFirstResponder ? caret : nil
             styledSelection = selection
-            highlighter.highlight(storage, editedRange: editedRange, selection: selection, isProcessingEdit: true)
+            let styled = highlighter.highlight(storage, editedRange: editedRange, selection: selection, isProcessingEdit: true)
+            scheduleLayoutRefresh(textView, range: styled)
         }
 
         func textViewDidChange(_ textView: UITextView) {
@@ -286,10 +292,46 @@ struct MarkdownEditorView: UIViewRepresentable {
             textView.typingAttributes = highlighter.baseAttributes
             let selection = activeSelection(textView)
             if !sameLines(selection, styledSelection, in: textView.text as NSString) {
-                highlighter.selectionChanged(textView.textStorage, from: styledSelection, to: selection)
+                let styled = highlighter.selectionChanged(textView.textStorage, from: styledSelection, to: selection)
+                scheduleLayoutRefresh(textView, range: styled)
             }
             styledSelection = selection
+            textView.layoutIfNeeded()
+            textView.scrollRangeToVisible(textView.selectedRange)
             controller.updateSuggestion()
+        }
+
+        /// Rebuilds glyphs for `range` on the next turn, after TextKit has finished the edit.
+        /// Hidden syntax is a custom attribute, so the line otherwise keeps its old (blank) glyphs
+        /// until the cursor comes back and the paragraph is laid out again.
+        private func scheduleLayoutRefresh(_ textView: UITextView, range: NSRange) {
+            guard range.length > 0 else { return }
+            let full = NSRange(location: 0, length: textView.textStorage.length)
+            let clamped = NSIntersectionRange(range, full)
+            guard clamped.length > 0 else { return }
+            pendingLayoutRange = pendingLayoutRange.map { NSUnionRange($0, clamped) } ?? clamped
+            guard !layoutRefreshScheduled else { return }
+            layoutRefreshScheduled = true
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                self.layoutRefreshScheduled = false
+                // Let an in-progress composition finish; its commit schedules another refresh.
+                guard textView.markedTextRange == nil else { return }
+                let length = textView.textStorage.length
+                let pending = self.pendingLayoutRange ?? NSRange(location: 0, length: length)
+                self.pendingLayoutRange = nil
+                let safe = NSIntersectionRange(pending, NSRange(location: 0, length: length))
+                guard safe.length > 0 else { return }
+                let selection = self.activeSelection(textView)
+                let styled = self.highlighter.highlight(textView.textStorage, editedRange: safe, selection: selection, isProcessingEdit: false)
+                self.styledSelection = selection
+                guard styled.length > 0 else { return }
+                let layout = textView.layoutManager
+                layout.invalidateGlyphs(forCharacterRange: styled, changeInLength: 0, actualCharacterRange: nil)
+                layout.invalidateLayout(forCharacterRange: styled, actualCharacterRange: nil)
+                layout.ensureLayout(forCharacterRange: styled)
+                layout.invalidateDisplay(forCharacterRange: styled)
+            }
         }
 
         /// Whether two selections cover the same lines, so no restyle is needed.
@@ -302,8 +344,8 @@ struct MarkdownEditorView: UIViewRepresentable {
         }
 
         private func lineHasMarker(_ r: NSRange, in text: NSString) -> Bool {
-            let line = text.substring(with: text.paragraphRange(for: r)).trimmingCharacters(in: .whitespaces)
-            return line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ")
+            let line = text.substring(with: text.paragraphRange(for: r))
+            return !MarkdownEditing.prefix(of: line).marker.isEmpty
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -317,6 +359,15 @@ struct MarkdownEditorView: UIViewRepresentable {
         }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+            if text.isEmpty {
+                // Backspace with no selection deletes the character before the caret.
+                let caret = textView.selectedRange
+                guard range.length == 1, caret.length == 0, NSMaxRange(range) == caret.location,
+                      textView.markedTextRange == nil,
+                      let edit = MarkdownEditing.backspaceKey(in: textView.text, selection: caret) else { return true }
+                controller.replace(edit)
+                return false
+            }
             guard text == "\n" else { return true }
             if controller.suggestion != nil, controller.onSuggestionReturn() { return false }
             if let edit = MarkdownEditing.returnKey(in: textView.text, selection: range) {
@@ -374,12 +425,20 @@ struct MarkdownEditorView: UIViewRepresentable {
 
             // Checkboxes: generous hit area around the drawn box.
             let lineGlyphs = layoutManager.glyphRange(forBoundingRect: lineRect, in: container)
-            let lineChars = layoutManager.characterRange(forGlyphRange: lineGlyphs, actualGlyphRange: nil)
+            var lineChars = layoutManager.characterRange(forGlyphRange: lineGlyphs, actualGlyphRange: nil)
+            // The hidden marker sits at the paragraph start; include it when this is the item's first line.
+            let paragraph = (storage.string as NSString).paragraphRange(for: NSRange(location: index, length: 0))
+            let firstGlyph = layoutManager.glyphIndexForCharacter(at: paragraph.location)
+            if firstGlyph < layoutManager.numberOfGlyphs,
+               layoutManager.lineFragmentRect(forGlyphAt: firstGlyph, effectiveRange: nil) == lineRect {
+                lineChars = NSUnionRange(lineChars, NSRange(location: paragraph.location, length: 0))
+            }
             var found: (() -> Void)?
             storage.enumerateAttribute(.mdDecoration, in: lineChars) { value, range, stop in
-                guard let decoration = value as? MarkdownDecoration, case .checkbox = decoration.kind else { return }
-                let boxGlyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-                let box = layoutManager.boundingRect(forGlyphRange: boxGlyphs, in: container).insetBy(dx: -10, dy: -8)
+                guard let decoration = value as? MarkdownDecoration, case .checkbox = decoration.kind,
+                      let preview = layoutManager as? LivePreviewLayoutManager,
+                      let gutter = preview.listGutter(forCharacterRange: range, in: container) else { return }
+                let box = preview.checkboxFrame(in: gutter).insetBy(dx: -10, dy: -8)
                 if box.contains(p) {
                     found = { [weak self] in self?.controller.toggleCheckbox(marker: range) }
                     stop.pointee = true
