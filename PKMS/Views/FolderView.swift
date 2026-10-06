@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import UniformTypeIdentifiers
 
 /// Lists the subfolders and Markdown documents of one vault folder.
 struct FolderView: View {
@@ -13,6 +15,8 @@ struct FolderView: View {
     @State private var nameText = ""
     @State private var pendingDelete: VaultNode?
     @State private var error: String?
+    /// Folder row currently under a drag, so it can highlight as a drop target.
+    @State private var dropTarget: VaultPath?
 
     /// What the name prompt is for.
     private enum NamingTask: Identifiable {
@@ -103,15 +107,30 @@ struct FolderView: View {
             } else {
                 // Rows are keyed by string so only documents carry a `VaultPath` selection tag;
                 // otherwise tapping a folder would select it as if it were a document.
-                ForEach(visibleChildren, id: \.path.string) { child in
-                    row(for: child)
-                        .contextMenu {
-                            Button("Rename", systemImage: "pencil") { startNaming(.rename(child)) }
-                            Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = child }
+                if folder.isRoot, !store.recentNotes.isEmpty {
+                    Section("Recent") {
+                        ForEach(store.recentNotes, id: \.path.string) { file in
+                            recentRow(file)
+                                .vaultDrag(file.path, store: store)
                         }
-                        .swipeActions(edge: .trailing) {
-                            Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = child }
-                        }
+                    }
+                }
+                Section {
+                    ForEach(visibleChildren, id: \.path.string) { child in
+                        row(for: child)
+                            .vaultDrag(child.path, store: store)
+                            .vaultFolderDrop(child.isFolder, into: child.path, store: store, dropTarget: $dropTarget) { source in
+                                move(source, into: child.path)
+                            }
+                            .listRowBackground(dropTarget == child.path ? Color.accentColor.opacity(0.22) : nil)
+                            .contextMenu {
+                                Button("Rename", systemImage: "pencil") { startNaming(.rename(child)) }
+                                Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = child }
+                            }
+                            .swipeActions(edge: .trailing) {
+                                Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = child }
+                            }
+                    }
                 }
             }
         }
@@ -120,7 +139,34 @@ struct FolderView: View {
             if sync.repository != nil { await sync.sync() }
             await store.reload()
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) { parentDropBar }
         .overlay { emptyState }
+    }
+
+    /// Notes opened most recently. Shown on the vault root, the way Notion lists recent pages.
+    private func recentRow(_ file: VaultNode) -> some View {
+        NavigationLink(value: file.path) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(file.displayName)
+                    if !file.path.parent.isRoot {
+                        Text(locationTitle(file.path.parent))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } icon: {
+                Image(systemName: "doc.text")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .tag(Optional(file.path))
+    }
+
+    private func locationTitle(_ path: VaultPath) -> String {
+        if path.isRoot { return "Vault" }
+        return store.index.node(at: path)?.displayName ?? path.string
     }
 
     @ViewBuilder
@@ -128,6 +174,8 @@ struct FolderView: View {
         if child.isFolder {
             NavigationLink(value: FolderRoute(path: child.path)) {
                 Label(child.displayName, systemImage: "folder")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
             }
         } else {
             NavigationLink(value: child.path) {
@@ -137,6 +185,8 @@ struct FolderView: View {
                     Image(systemName: sync.conflicts[child.path] != nil ? "exclamationmark.triangle" : "doc.text")
                         .foregroundStyle(sync.conflicts[child.path] != nil ? AnyShapeStyle(.orange) : AnyShapeStyle(.tint))
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .tag(Optional(child.path))
         }
@@ -146,7 +196,7 @@ struct FolderView: View {
     private var emptyState: some View {
         if !query.isEmpty, store.index.search(query).isEmpty {
             ContentUnavailableView.search(text: query)
-        } else if query.isEmpty, visibleChildren.isEmpty {
+        } else if query.isEmpty, visibleChildren.isEmpty, !showsRecent {
             if store.isLoading {
                 ProgressView()
             } else if let error = store.loadError {
@@ -161,6 +211,38 @@ struct FolderView: View {
                     Button("New Note") { createNote() }
                         .buttonStyle(.borderedProminent)
                 }
+            }
+        }
+    }
+
+    private var showsRecent: Bool { folder.isRoot && query.isEmpty && !store.recentNotes.isEmpty }
+
+    /// A bar under the list, only while dragging, for moving the item up to the parent folder.
+    /// It stays out of the row list so it doesn't shift the folder under the finger.
+    @ViewBuilder
+    private var parentDropBar: some View {
+        if query.isEmpty, !folder.isRoot, let source = store.draggedPath, store.canMove(source, into: folder.parent) {
+            let title = locationTitle(folder.parent)
+            Text("Move to \(title)")
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(dropTarget == folder.parent ? Color.accentColor.opacity(0.28) : Color.accentColor.opacity(0.12), in: .rect(cornerRadius: 12))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+                .vaultFolderDrop(true, into: folder.parent, store: store, dropTarget: $dropTarget) { source in
+                    move(source, into: folder.parent)
+                }
+        }
+    }
+
+    private func move(_ source: VaultPath, into destination: VaultPath) {
+        Task {
+            do {
+                try await store.move(source, into: destination)
+            } catch {
+                self.error = error.localizedDescription
             }
         }
     }
@@ -241,5 +323,83 @@ struct FolderView: View {
                 self.error = error.localizedDescription
             }
         }
+    }
+}
+
+private extension View {
+    /// Starts a same-app drag. The path is kept on the store so the drop lands on the row under the finger, not on whatever the pasteboard resolves to.
+    func vaultDrag(_ path: VaultPath, store: VaultStore) -> some View {
+        onDrag {
+            store.draggedPath = path
+            let payload = VaultDragPayload(path: path.string) { [store] in
+                if store.draggedPath == path { store.draggedPath = nil }
+            }
+            return NSItemProvider(object: payload)
+        }
+    }
+
+    /// Accepts a drop only when `enabled` (folder rows and the parent bar). A miss on a note does not count as a move.
+    @ViewBuilder
+    func vaultFolderDrop(
+        _ enabled: Bool,
+        into destination: VaultPath,
+        store: VaultStore,
+        dropTarget: Binding<VaultPath?>,
+        perform: @escaping (VaultPath) -> Void
+    ) -> some View {
+        if enabled {
+            onDrop(of: [UTType.utf8PlainText], isTargeted: Binding(
+                get: { dropTarget.wrappedValue == destination },
+                set: { targeted in
+                    let allowed = targeted && store.draggedPath.map { store.canMove($0, into: destination) } == true
+                    if allowed {
+                        if dropTarget.wrappedValue != destination {
+                            dropTarget.wrappedValue = destination
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        }
+                    } else if dropTarget.wrappedValue == destination {
+                        dropTarget.wrappedValue = nil
+                    }
+                }
+            )) { _ in
+                guard let source = store.draggedPath, store.canMove(source, into: destination) else { return false }
+                store.draggedPath = nil
+                dropTarget.wrappedValue = nil
+                perform(source)
+                return true
+            }
+        } else {
+            self
+        }
+    }
+}
+
+/// Drag payload for a vault path. Releasing it (drop or cancel) clears the in-memory drag if this path is still current.
+private final class VaultDragPayload: NSObject, NSItemProviderWriting {
+    static var writableTypeIdentifiersForItemProvider: [String] { [UTType.utf8PlainText.identifier] }
+
+    let path: String
+    private let onEnd: @MainActor () -> Void
+
+    init(path: String, onEnd: @escaping @MainActor () -> Void) {
+        self.path = path
+        self.onEnd = onEnd
+    }
+
+    deinit {
+        let end = onEnd
+        Task { @MainActor in
+            // The drop handler reads the path in the same moment the system releases this payload.
+            try? await Task.sleep(for: .milliseconds(400))
+            end()
+        }
+    }
+
+    func loadData(
+        withTypeIdentifier typeIdentifier: String,
+        forItemProviderCompletionHandler completionHandler: @escaping @Sendable (Data?, (any Error)?) -> Void
+    ) -> Progress? {
+        completionHandler(Data(path.utf8), nil)
+        return nil
     }
 }

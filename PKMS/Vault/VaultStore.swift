@@ -12,12 +12,17 @@ final class VaultStore {
     }
 
     let repository: any VaultRepository
+    private let defaults: UserDefaults
     private(set) var index: FileIndex = .empty
     private(set) var isLoading = false
     private(set) var loadError: String?
     /// Incremented on every reload so open documents know to re-read their file.
     private(set) var revision = 0
     private(set) var lastMove: Move?
+    /// Path currently being dragged in the sidebar. Same-app drops read this so the move doesn't depend on the system pasteboard.
+    var draggedPath: VaultPath?
+    /// Recently opened notes, newest first. Paths that no longer exist are omitted.
+    private(set) var recentPaths: [VaultPath] = []
     /// A newly created note that should open straight into the editor.
     var pendingEdit: VaultPath?
 
@@ -26,8 +31,32 @@ final class VaultStore {
     /// Editors with unsaved text register here so sync can save them first.
     @ObservationIgnored private var flushers: [UUID: () -> Void] = [:]
 
-    init(repository: any VaultRepository) {
+    init(repository: any VaultRepository, defaults: UserDefaults = .standard) {
         self.repository = repository
+        self.defaults = defaults
+        recentPaths = (defaults.stringArray(forKey: Key.recent) ?? []).map(VaultPath.init)
+    }
+
+    private enum Key {
+        static let recent = "vault.recent"
+    }
+
+    /// Notes the user has opened, newest first, skipping anything no longer in the vault.
+    var recentNotes: [VaultNode] {
+        recentPaths.compactMap { path in
+            guard let node = index.node(at: path), node.kind == .markdown else { return nil }
+            return node
+        }
+    }
+
+    /// Records that `path` was opened. The same note opened again just moves to the front.
+    func recordView(_ path: VaultPath) {
+        guard path.isMarkdown else { return }
+        guard recentPaths.first != path else { return }
+        recentPaths.removeAll { $0 == path }
+        recentPaths.insert(path, at: 0)
+        if recentPaths.count > 12 { recentPaths = Array(recentPaths.prefix(12)) }
+        saveRecent()
     }
 
     /// Rebuilds the index from disk. Call on launch, on pull-to-refresh, and after a sync.
@@ -38,6 +67,11 @@ final class VaultStore {
             index = try await repository.loadIndex()
             loadError = nil
             revision += 1
+            let kept = recentPaths.filter { index.node(at: $0)?.kind == .markdown }
+            if kept.count != recentPaths.count {
+                recentPaths = kept
+                saveRecent()
+            }
         } catch {
             loadError = error.localizedDescription
         }
@@ -78,14 +112,57 @@ final class VaultStore {
         guard destination != path else { return path }
         flushPendingEdits()
         try repository.move(path, to: destination)
-        lastMove = Move(from: path, to: destination)
+        noteStructuralMove(from: path, to: destination)
         await changedStructure()
         return destination
     }
 
+    /// Moves a note or folder into `folder`, keeping its name. Adds “ 2”, “ 3”, … if that name is taken.
+    /// Moving something into its current folder does nothing.
+    @discardableResult
+    func move(_ path: VaultPath, into folder: VaultPath) async throws -> VaultPath {
+        guard canMove(path, into: folder) else { throw VaultError.cannotMoveIntoItself }
+        flushPendingEdits()
+        let destination = uniqueDestination(for: path, in: folder)
+        guard destination != path else { return path }
+        try repository.move(path, to: destination)
+        noteStructuralMove(from: path, to: destination)
+        await changedStructure()
+        return destination
+    }
+
+    /// A folder cannot be dropped onto itself or anything inside it, and an item already in `folder` stays put.
+    func canMove(_ path: VaultPath, into folder: VaultPath) -> Bool {
+        guard !path.isRoot, path != folder, !folder.hasPrefix(path) else { return false }
+        return path.parent != folder
+    }
+
+    private func uniqueDestination(for path: VaultPath, in folder: VaultPath) -> VaultPath {
+        let isFolder = index.node(at: path)?.isFolder == true
+        if isFolder {
+            return uniquePath(named: path.name, extension: nil, in: folder)
+        }
+        let ext = path.pathExtension
+        return uniquePath(named: path.baseName, extension: ext.isEmpty ? nil : ext, in: folder)
+    }
+
     func delete(_ path: VaultPath) async throws {
         try repository.delete(path)
+        recentPaths.removeAll { $0.hasPrefix(path) }
+        saveRecent()
         await changedStructure()
+    }
+
+    private func noteStructuralMove(from path: VaultPath, to destination: VaultPath) {
+        lastMove = Move(from: path, to: destination)
+        recentPaths = recentPaths.map { $0.movingPrefix(path, to: destination) ?? $0 }
+        var seen = Set<VaultPath>()
+        recentPaths = recentPaths.filter { seen.insert($0).inserted }
+        saveRecent()
+    }
+
+    private func saveRecent() {
+        defaults.set(recentPaths.map(\.string), forKey: Key.recent)
     }
 
     /// Returns `path` unless a file already exists there, in which case " 2", " 3", … is appended.

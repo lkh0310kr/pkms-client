@@ -97,6 +97,7 @@ struct DocumentView: View {
                 focusOnAppear = true
             }
             text = loaded
+            store.recordView(path)
         } catch {
             loadError = error.localizedDescription
         }

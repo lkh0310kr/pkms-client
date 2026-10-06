@@ -2,6 +2,104 @@ import Foundation
 import Testing
 @testable import PKMS
 
+struct VaultMoveTests {
+    @Test @MainActor func movesANoteIntoAFolder() async throws {
+        let harness = try MoveHarness()
+        try harness.repo.writeText("# Hi\n", to: VaultPath("Note.md"))
+        try harness.repo.createFolder(at: VaultPath("Projects"))
+        await harness.store.reload()
+        let moved = try await harness.store.move(VaultPath("Note.md"), into: VaultPath("Projects"))
+        #expect(moved == VaultPath("Projects/Note.md"))
+        #expect(harness.repo.exists(moved))
+        #expect(!harness.repo.exists(VaultPath("Note.md")))
+        #expect(harness.store.lastMove == VaultStore.Move(from: VaultPath("Note.md"), to: moved))
+    }
+
+    @Test @MainActor func movesAFolderAndKeepsItsNotes() async throws {
+        let harness = try MoveHarness()
+        try harness.repo.createFolder(at: VaultPath("Archive"))
+        try harness.repo.writeText("# \n", to: VaultPath("Work/Plan.md"))
+        await harness.store.reload()
+        let moved = try await harness.store.move(VaultPath("Work"), into: VaultPath("Archive"))
+        #expect(moved == VaultPath("Archive/Work"))
+        #expect(harness.repo.exists(VaultPath("Archive/Work/Plan.md")))
+    }
+
+    @Test @MainActor func addsASuffixWhenTheNameIsTaken() async throws {
+        let harness = try MoveHarness()
+        try harness.repo.writeText("a", to: VaultPath("Note.md"))
+        try harness.repo.writeText("b", to: VaultPath("Projects/Note.md"))
+        await harness.store.reload()
+        let moved = try await harness.store.move(VaultPath("Note.md"), into: VaultPath("Projects"))
+        #expect(moved == VaultPath("Projects/Note 2.md"))
+        #expect(try await harness.repo.readText(at: VaultPath("Projects/Note.md")) == "b")
+    }
+
+    @Test @MainActor func refusesToMoveAFolderIntoItself() async throws {
+        let harness = try MoveHarness()
+        try harness.repo.createFolder(at: VaultPath("Work/Nested"))
+        await harness.store.reload()
+        #expect(!harness.store.canMove(VaultPath("Work"), into: VaultPath("Work")))
+        #expect(!harness.store.canMove(VaultPath("Work"), into: VaultPath("Work/Nested")))
+        #expect(!harness.store.canMove(VaultPath("Work/Nested"), into: VaultPath("Work")))
+        await #expect(throws: VaultError.cannotMoveIntoItself) {
+            try await harness.store.move(VaultPath("Work"), into: VaultPath("Work/Nested"))
+        }
+    }
+
+    @Test @MainActor func recentNotesFollowOpensMovesAndDeletes() async throws {
+        let suite = "pkms-recent-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let root = FileManager.default.temporaryDirectory.appending(path: "pkms-recent-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let repo = LocalVaultRepository(rootURL: root)
+        try repo.writeText("a", to: VaultPath("A.md"))
+        try repo.writeText("b", to: VaultPath("Work/Plan.md"))
+        try repo.createFolder(at: VaultPath("Archive"))
+        let store = VaultStore(repository: repo, defaults: defaults)
+        await store.reload()
+
+        store.recordView(VaultPath("A.md"))
+        store.recordView(VaultPath("Work/Plan.md"))
+        store.recordView(VaultPath("A.md"))
+        store.recordView(VaultPath("not-a-note"))
+        #expect(store.recentNotes.map(\.path) == [VaultPath("A.md"), VaultPath("Work/Plan.md")])
+
+        _ = try await store.move(VaultPath("Work"), into: VaultPath("Archive"))
+        #expect(store.recentNotes.map(\.path) == [VaultPath("A.md"), VaultPath("Archive/Work/Plan.md")])
+
+        _ = try await store.rename(VaultPath("A.md"), to: "Alpha")
+        #expect(store.recentNotes.map(\.path) == [VaultPath("Alpha.md"), VaultPath("Archive/Work/Plan.md")])
+
+        try await store.delete(VaultPath("Archive"))
+        #expect(store.recentNotes.map(\.path) == [VaultPath("Alpha.md")])
+
+        let reloaded = VaultStore(repository: repo, defaults: defaults)
+        await reloaded.reload()
+        #expect(reloaded.recentNotes.map(\.path) == [VaultPath("Alpha.md")])
+
+        try repo.delete(VaultPath("Alpha.md"))
+        await reloaded.reload()
+        #expect(reloaded.recentNotes.isEmpty)
+    }
+}
+
+private struct MoveHarness {
+    let root: URL
+    let repo: LocalVaultRepository
+    let store: VaultStore
+
+    @MainActor init() throws {
+        root = FileManager.default.temporaryDirectory.appending(path: "pkms-move-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        repo = LocalVaultRepository(rootURL: root)
+        store = VaultStore(repository: repo)
+    }
+}
+
 struct GitBlobHashTests {
     @Test func matchesGit() {
         // `git hash-object` of an empty file and of "hello\n".

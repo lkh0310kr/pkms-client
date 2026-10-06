@@ -22,14 +22,16 @@ protocol VaultRepository: Sendable {
     func exists(_ path: VaultPath) -> Bool
 }
 
-enum VaultError: LocalizedError {
+enum VaultError: LocalizedError, Equatable {
     case unreadableText(VaultPath)
     case alreadyExists(VaultPath)
+    case cannotMoveIntoItself
 
     var errorDescription: String? {
         switch self {
         case .unreadableText(let path): "“\(path.name)” is not a UTF-8 text file."
         case .alreadyExists(let path): "“\(path.name)” already exists."
+        case .cannotMoveIntoItself: "A folder can’t be moved into itself."
         }
     }
 }
