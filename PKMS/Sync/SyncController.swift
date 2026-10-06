@@ -28,6 +28,9 @@ final class SyncController {
     private let vault: VaultStore
     private let vaultRoot: URL
     private let defaults = UserDefaults.standard
+    private let account: GitHubAccount
+    /// Matches `GitHubAccount`'s ticket so a sign-out can't delete a sign-in that won the race.
+    private var accountTicket = 0
 
     private enum Key {
         static let account = "github.account"
@@ -39,7 +42,9 @@ final class SyncController {
     init(vault: VaultStore, vaultRoot: URL) {
         self.vault = vault
         self.vaultRoot = vaultRoot
-        token = TokenStore.read()
+        let stored = TokenStore.read()
+        account = GitHubAccount(credentials: stored)
+        token = stored?.accessToken
         accountName = defaults.string(forKey: Key.account)
         repository = defaults.string(forKey: Key.repository)
         branch = defaults.string(forKey: Key.branch) ?? "main"
@@ -49,27 +54,49 @@ final class SyncController {
     }
 
     var isSignedIn: Bool { token != nil }
+    /// True when this account has authorized the app but not installed it, so private repositories stay invisible.
+    private(set) var needsAppInstall = false
     var isSyncing: Bool { if case .syncing = status { true } else { false } }
-    var client: GitHubClient { GitHubClient(token: token) }
+    var client: GitHubClient {
+        GitHubClient(token: token, account: token == nil ? nil : account)
+    }
 
     // MARK: - Account
 
-    /// Verifies a token (from Device Flow or pasted by the user) and stores it in the Keychain.
-    func signIn(token: String) async throws {
-        let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        let user = try await GitHubClient(token: token).currentUser()
-        TokenStore.save(token)
-        self.token = token
+    /// Verifies credentials (from Device Flow or a pasted token) and stores them in the Keychain.
+    func signIn(_ credentials: GitHubCredentials) async throws {
+        let credentials = GitHubCredentials(
+            accessToken: credentials.accessToken.trimmingCharacters(in: .whitespacesAndNewlines),
+            refreshToken: credentials.refreshToken,
+            accessExpiresAt: credentials.accessExpiresAt,
+            refreshExpiresAt: credentials.refreshExpiresAt
+        )
+        let user = try await GitHubClient(token: credentials.accessToken).currentUser()
+        accountTicket += 1
+        await account.replace(credentials, ticket: accountTicket)
+        token = credentials.accessToken
         accountName = user.login
         defaults.set(user.login, forKey: Key.account)
     }
 
+    func signIn(token: String) async throws {
+        try await signIn(GitHubCredentials(accessToken: token))
+    }
+
     /// Forgets the token. Notes already on this device stay.
     func signOut() {
-        TokenStore.delete()
+        let ticket = accountTicket
         token = nil
         accountName = nil
         defaults.removeObject(forKey: Key.account)
+        Task { await account.clear(ticket: ticket) }
+    }
+
+    /// Signs out when GitHub has rejected the session and refreshing didn't help.
+    func noteAuthenticationFailure(_ error: Error) {
+        if let github = error as? GitHubError, case .unauthorized = github {
+            signOut()
+        }
     }
 
     // MARK: - Repository
@@ -117,10 +144,26 @@ final class SyncController {
             lastSync = .now
             defaults.set(lastSync, forKey: Key.lastSync)
             hasLocalChanges = report.notUploaded > 0
+            needsAppInstall = false
             status = .idle
             if report.changedVault || isNewRepository { await vault.reload() }
         } catch {
-            status = .failed(error.localizedDescription)
+            GitHubLog.error("sync failed: \(error.localizedDescription)")
+            noteAuthenticationFailure(error)
+            if let github = error as? GitHubError, case .notFound = github {
+                let installed = isSignedIn ? await client.hasAppInstallation() : true
+                let missingInstall = isSignedIn && !installed
+                needsAppInstall = missingInstall
+                if !isSignedIn || missingInstall {
+                    status = .failed(isSignedIn
+                        ? "The GitHub App isn’t installed on this repository. Allow private repositories, choose All repositories, then sync again."
+                        : "This repository is private. Sign in, then install the GitHub App on it.")
+                } else {
+                    status = .failed(error.localizedDescription)
+                }
+            } else {
+                status = .failed(error.localizedDescription)
+            }
             await vault.reload()  // show whatever was synced before the failure
         }
         loadConflicts()

@@ -26,7 +26,7 @@ struct GitTree: Decodable, Sendable {
     let truncated: Bool
 }
 
-enum GitHubError: LocalizedError {
+enum GitHubError: LocalizedError, Equatable {
     case unauthorized
     case notFound
     case rateLimited(resetsAt: Date?)
@@ -58,6 +58,8 @@ enum GitHubError: LocalizedError {
 /// Minimal GitHub REST API client. It covers only what sync needs; Git itself stays an implementation detail.
 struct GitHubClient: Sendable {
     var token: String?
+    /// When set, access tokens are refreshed before they expire and once after a 401.
+    var account: GitHubAccount?
     var session: URLSession = .shared
 
     private static let baseURL = URL(string: "https://api.github.com")!
@@ -66,19 +68,97 @@ struct GitHubClient: Sendable {
         try await decode(get("user"))
     }
 
-    /// Repositories the user can access, most recently updated first.
+    /// Repositories this sign-in can read. GitHub App tokens omit private repositories from
+    /// `/user/repos` unless the app is installed on them; those are listed per installation.
     func repositories() async throws -> [GitHubRepository] {
-        var result: [GitHubRepository] = []
+        let installed: [GitHubRepository]
+        do {
+            installed = try await installedRepositories()
+        } catch GitHubError.unauthorized {
+            throw GitHubError.unauthorized
+        } catch {
+            GitHubLog.info("installation repos unavailable: \(error.localizedDescription)")
+            installed = []
+        }
+        let listed: [GitHubRepository]
+        do {
+            listed = try await listedRepositories()
+        } catch {
+            if !installed.isEmpty { return deduped(installed, []) }
+            throw error
+        }
+        let result = deduped(installed, listed)
+        GitHubLog.info("repositories \(result.count), private \(result.filter(\.private).count)")
+        return result
+    }
+
+    /// Whether this user has installed the GitHub App on at least one account.
+    func hasAppInstallation() async -> Bool {
+        struct Page: Decodable {
+            let totalCount: Int?
+            let installations: [Item]
+        }
+        struct Item: Decodable { let id: Int }
+        do {
+            let page: Page = try await decode(get("user/installations", query: [
+                URLQueryItem(name: "per_page", value: "1"),
+            ]))
+            let count = page.totalCount ?? page.installations.count
+            return count > 0
+        } catch {
+            return true
+        }
+    }
+
+    /// Repositories the GitHub App is installed on and this user can access.
+    private func installedRepositories() async throws -> [GitHubRepository] {
+        struct Page: Decodable { let installations: [Item] }
+        struct Item: Decodable { let id: Int }
+        struct RepoPage: Decodable { let repositories: [GitHubRepository] }
+
+        var installations: [Item] = []
         for page in 1...5 {
+            let batch: Page = try await decode(get("user/installations", query: [
+                URLQueryItem(name: "per_page", value: "100"),
+                URLQueryItem(name: "page", value: String(page)),
+            ]))
+            installations += batch.installations
+            if batch.installations.count < 100 { break }
+        }
+        var repos: [GitHubRepository] = []
+        for installation in installations {
+            for page in 1...10 {
+                let batch: RepoPage = try await decode(get("user/installations/\(installation.id)/repositories", query: [
+                    URLQueryItem(name: "per_page", value: "100"),
+                    URLQueryItem(name: "page", value: String(page)),
+                ]))
+                repos += batch.repositories
+                if batch.repositories.count < 100 { break }
+            }
+        }
+        return repos
+    }
+
+    /// `/user/repos` needs an explicit visibility for fine-grained and GitHub App tokens; otherwise private repos are dropped.
+    private func listedRepositories() async throws -> [GitHubRepository] {
+        var result: [GitHubRepository] = []
+        for page in 1...10 {
             let batch: [GitHubRepository] = try await decode(get("user/repos", query: [
                 URLQueryItem(name: "per_page", value: "100"),
                 URLQueryItem(name: "page", value: String(page)),
                 URLQueryItem(name: "sort", value: "updated"),
+                URLQueryItem(name: "visibility", value: "all"),
+                URLQueryItem(name: "affiliation", value: "owner,collaborator,organization_member"),
             ]))
             result += batch
             if batch.count < 100 { break }
         }
         return result
+    }
+
+    private func deduped(_ first: [GitHubRepository], _ second: [GitHubRepository]) -> [GitHubRepository] {
+        var seen = Set<String>()
+        return (first + second).filter { seen.insert($0.fullName).inserted }
     }
 
     func repository(_ fullName: String) async throws -> GitHubRepository {
@@ -165,8 +245,44 @@ struct GitHubClient: Sendable {
         try await send("GET", path, query: query, accept: accept, body: Optional<String>.none)
     }
 
+    private func resolvedToken() async throws -> String? {
+        if let account { return try await account.accessToken() }
+        guard let token, !token.isEmpty else { return nil }
+        return token
+    }
+
     private func send(_ method: String, _ path: String, query: [URLQueryItem] = [],
                       accept: String = "application/vnd.github+json", body: (some Encodable)?) async throws -> Data {
+        let token: String?
+        do {
+            token = try await resolvedToken()
+        } catch {
+            GitHubLog.error("\(method) \(path) token: \(error.localizedDescription)")
+            throw error
+        }
+        let (data, http) = try await execute(method, path, query: query, accept: accept, body: body, token: token)
+        if http.statusCode == 401, let account, let token {
+            let refreshed = try await account.refreshAfterUnauthorized(rejected: token)
+            let (retryData, retryHTTP) = try await execute(method, path, query: query, accept: accept, body: body, token: refreshed)
+            return try outcome(of: retryHTTP, data: retryData, method: method)
+        }
+        return try outcome(of: http, data: data, method: method)
+    }
+
+    private func execute(_ method: String, _ path: String, query: [URLQueryItem], accept: String,
+                         body: (some Encodable)?, token: String?) async throws -> (Data, HTTPURLResponse) {
+        do {
+            return try await load(method, path, query: query, accept: accept, body: body, token: token)
+        } catch let error as GitHubTransportError where method == "GET" && error.isTransient {
+            // Writes are not retried: a lost response may already have been applied, and a refresh rotates the token.
+            GitHubLog.info("retry GET \(path) after \(error.localizedDescription)")
+            try await Task.sleep(for: .milliseconds(400))
+            return try await load(method, path, query: query, accept: accept, body: body, token: token)
+        }
+    }
+
+    private func load(_ method: String, _ path: String, query: [URLQueryItem], accept: String,
+                      body: (some Encodable)?, token: String?) async throws -> (Data, HTTPURLResponse) {
         var url = Self.baseURL.appending(path: path)
         if !query.isEmpty { url.append(queryItems: query) }
         var request = URLRequest(url: url)
@@ -177,11 +293,23 @@ struct GitHubClient: Sendable {
         }
         request.setValue(accept, forHTTPHeaderField: "Accept")
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-        if let token, !token.isEmpty {
+        let authed = token?.isEmpty == false
+        if authed, let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        GitHubLog.info("\(method) \(url.path) auth=\(authed)")
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+            GitHubLog.info("\(method) \(url.path) -> \(http.statusCode) \(data.count) bytes")
+            return (data, http)
+        } catch {
+            GitHubLog.error("\(method) \(url.path) \((error as NSError).domain) \((error as NSError).code) \(error.localizedDescription)")
+            throw GitHubTransportError(method: method, url: url, underlying: error)
+        }
+    }
+
+    private func outcome(of http: HTTPURLResponse, data: Data, method: String) throws -> Data {
         switch http.statusCode {
         case 200..<300:
             return data

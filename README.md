@@ -46,8 +46,8 @@ There's no separate viewer. A note is always the editor, and it works like Obsid
 
 ## GitHub sync (two-way)
 
-- **Sign-in:** OAuth Device Flow, with a personal access token as a fallback. The token is stored in the Keychain.
-- **One-time setup for "Sign in with GitHub":** create an OAuth App at <https://github.com/settings/developers>, enable **Device Flow**, and put its Client ID in `GitHubAppConfig.clientID` (`PKMS/Sync/GitHubAuth.swift`). No client secret is needed.
+- **Sign-in:** GitHub App Device Flow, with a personal access token as a fallback. Credentials are stored in the Keychain. User access tokens expire after 8 hours; the app refreshes them (and rotates the refresh token, which lasts 6 months) automatically.
+- **One-time setup for "Sign in with GitHub":** create a GitHub App at <https://github.com/settings/apps/new>, enable **Device Flow**, set Contents to Read and write, turn off the webhook, and put its Client ID in `GitHubAppConfig.clientID` (`PKMS/Sync/GitHubAuth.swift`). No client secret is needed.
 - **Upload:** local edits are uploaded about 4 seconds after they're saved, when leaving the editor, and when the app goes to the background. They're sent as one commit through the Git Data API (blobs → tree → commit → fast-forward ref update). If the branch moved in the meantime, the app pulls again and retries.
 - **How a pull works:** it fetches the branch head, then the recursive tree, and downloads only the blobs whose git SHA-1 differs from the local file. Downloads are checked against the SHA and written atomically.
 - **Change detection:** three-way, comparing the last-synced base, the local file and the remote file. An edit always wins over a delete.

@@ -293,3 +293,230 @@ final class RacingRemote: RemoteVault, @unchecked Sendable {
         return try await inner.upload(changes, parent: parent, message: message)
     }
 }
+
+struct GitHubRepositoryListTests {
+    @Test func includesPrivateReposFromTheAppInstallation() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [InstallationRepoStub.self]
+        let client = GitHubClient(token: "ghu_test", session: URLSession(configuration: config))
+        let names = try await client.repositories().map(\.fullName)
+        #expect(names.contains("me/private-notes"))
+        #expect(names.contains("me/public"))
+    }
+}
+
+/// Installation listing returns the private repo; `/user/repos` returns only a public one.
+private final class InstallationRepoStub: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        let body: String
+        if path == "/user/installations" {
+            body = #"{"total_count":1,"installations":[{"id":7}]}"#
+        } else if path.hasPrefix("/user/installations/") {
+            body = #"{"total_count":1,"repositories":[{"full_name":"me/private-notes","default_branch":"main","private":true}]}"#
+        } else {
+            body = #"[{"full_name":"me/public","default_branch":"main","private":false}]"#
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+struct GitHubCredentialTests {
+    @Test func readsLegacyPlainToken() {
+        let credentials = TokenStore.credentials(from: Data("gho_legacy".utf8))
+        #expect(credentials?.accessToken == "gho_legacy")
+        #expect(credentials?.refreshToken == nil)
+        #expect(credentials?.needsRefresh == false)
+    }
+
+    @Test func roundTripsStoredCredentials() throws {
+        let original = GitHubCredentials(
+            accessToken: "ghu_a",
+            refreshToken: "ghr_b",
+            accessExpiresAt: Date(timeIntervalSince1970: 1_700_000_000),
+            refreshExpiresAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        let data = try JSONEncoder().encode(original)
+        #expect(TokenStore.credentials(from: data) == original)
+    }
+
+    @Test func refreshesNearExpiryOnly() {
+        let soon = GitHubCredentials(
+            accessToken: "a", refreshToken: "r",
+            accessExpiresAt: .now.addingTimeInterval(60),
+            refreshExpiresAt: .distantFuture
+        )
+        let later = GitHubCredentials(
+            accessToken: "a", refreshToken: "r",
+            accessExpiresAt: .now.addingTimeInterval(3600),
+            refreshExpiresAt: .distantFuture
+        )
+        let expiredRefresh = GitHubCredentials(
+            accessToken: "a", refreshToken: "r",
+            accessExpiresAt: .distantPast,
+            refreshExpiresAt: .distantPast
+        )
+        #expect(soon.needsRefresh)
+        #expect(!later.needsRefresh)
+        #expect(!expiredRefresh.refreshTokenIsUsable)
+        #expect(!expiredRefresh.needsRefresh)
+    }
+
+    @Test func oneRefreshServesConcurrentCalls() async throws {
+        let tally = RefreshTally()
+        let account = GitHubAccount(
+            credentials: GitHubCredentials(
+                accessToken: "old", refreshToken: "refresh",
+                accessExpiresAt: .distantPast, refreshExpiresAt: .distantFuture
+            ),
+            persist: false
+        ) { _ in
+            await tally.bump()
+            try await Task.sleep(for: .milliseconds(50))
+            return GitHubCredentials(
+                accessToken: "new", refreshToken: "refresh-2",
+                accessExpiresAt: .distantFuture, refreshExpiresAt: .distantFuture
+            )
+        }
+        async let first = account.accessToken()
+        async let second = account.accessToken()
+        let tokens = try await [first, second]
+        #expect(tokens == ["new", "new"])
+        #expect(await tally.value == 1)
+    }
+
+    @Test func signOutDropsALateRefresh() async {
+        let tally = RefreshTally()
+        let gate = RefreshGate()
+        let account = GitHubAccount(
+            credentials: GitHubCredentials(
+                accessToken: "old", refreshToken: "refresh",
+                accessExpiresAt: .distantPast, refreshExpiresAt: .distantFuture
+            ),
+            persist: false
+        ) { _ in
+            await tally.bump()
+            await gate.wait()
+            return GitHubCredentials(
+                accessToken: "resurrected", refreshToken: "refresh-2",
+                accessExpiresAt: .distantFuture, refreshExpiresAt: .distantFuture
+            )
+        }
+        let pending = Task { try await account.accessToken() }
+        var spins = 0
+        while await tally.value == 0 {
+            spins += 1
+            if spins > 1_000 {
+                Issue.record("Refresh never started")
+                gate.open()
+                return
+            }
+            await Task.yield()
+        }
+        await account.clear(ticket: 0)
+        gate.open()
+        if case .success = await pending.result {
+            Issue.record("Refresh after sign-out should not yield a token")
+        }
+        await #expect(throws: GitHubError.unauthorized) {
+            try await account.accessToken()
+        }
+    }
+
+    @Test func retriesWithRefreshedTokenAfter401() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [GitHubRetryStub.self]
+        let account = GitHubAccount(
+            credentials: GitHubCredentials(
+                accessToken: "old", refreshToken: "refresh",
+                accessExpiresAt: .distantFuture, refreshExpiresAt: .distantFuture
+            ),
+            persist: false
+        ) { _ in
+            GitHubCredentials(
+                accessToken: "new", refreshToken: "refresh-2",
+                accessExpiresAt: .distantFuture, refreshExpiresAt: .distantFuture
+            )
+        }
+        let client = GitHubClient(token: "old", account: account, session: URLSession(configuration: config))
+        let user = try await client.currentUser()
+        #expect(user.login == "octocat")
+        #expect(GitHubRetryStub.authorizations == ["Bearer old", "Bearer new"])
+    }
+}
+
+private actor RefreshTally {
+    private(set) var value = 0
+    func bump() { value += 1 }
+}
+
+/// Lets a test hold a refresh until sign-out has run.
+private final class RefreshGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var opened = false
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            self.lock.lock()
+            if self.opened {
+                self.lock.unlock()
+                continuation.resume()
+                return
+            }
+            self.continuation = continuation
+            self.lock.unlock()
+        }
+    }
+
+    func open() {
+        lock.lock()
+        opened = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+}
+
+/// First API call answers 401, the retry answers the current user. Records Authorization headers.
+private final class GitHubRetryStub: URLProtocol, @unchecked Sendable {
+    private final class Log: @unchecked Sendable {
+        let lock = NSLock()
+        var recorded: [String?] = []
+    }
+
+    private static let log = Log()
+
+    static var authorizations: [String?] {
+        log.lock.lock()
+        defer { log.lock.unlock() }
+        return log.recorded
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.log.lock.lock()
+        Self.log.recorded.append(request.value(forHTTPHeaderField: "Authorization"))
+        let hit = Self.log.recorded.count
+        Self.log.lock.unlock()
+        let status = hit == 1 ? 401 : 200
+        let body = hit == 1 ? Data() : Data(#"{"login":"octocat"}"#.utf8)
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}

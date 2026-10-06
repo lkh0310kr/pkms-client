@@ -12,6 +12,7 @@ struct SettingsView: View {
                 Section {
                     if sync.isSignedIn {
                         LabeledContent("Account", value: sync.accountName.map { "@\($0)" } ?? "Signed in")
+                        Link("Allow private repositories", destination: GitHubAppConfig.installURL)
                         Button("Sign Out", role: .destructive) { sync.signOut() }
                     } else {
                         SignInView()
@@ -19,7 +20,11 @@ struct SettingsView: View {
                 } header: {
                     Text("GitHub")
                 } footer: {
-                    if !sync.isSignedIn {
+                    if sync.isSignedIn {
+                        Text(sync.needsAppInstall
+                            ? "This account hasn’t installed the app yet. Allow private repositories and choose All repositories."
+                            : "Signing in only approves the app. Private repositories show up after you install it on your account and choose All repositories.")
+                    } else {
                         Text("Sign in to sync private repositories. Public repositories work without signing in.")
                     }
                 }
@@ -171,8 +176,8 @@ private struct SignInView: View {
                 let flow = GitHubDeviceFlow(clientID: GitHubAppConfig.clientID)
                 let code = try await flow.start()
                 deviceCode = code
-                let token = try await flow.waitForToken(code)
-                try await sync.signIn(token: token)
+                let credentials = try await flow.waitForToken(code)
+                try await sync.signIn(credentials)
             } catch is CancellationError {
             } catch {
                 self.error = error.localizedDescription
@@ -264,6 +269,7 @@ private struct RepositoryPickerView: View {
         do {
             repositories = try await sync.client.repositories()
         } catch {
+            sync.noteAuthenticationFailure(error)
             self.error = error.localizedDescription
         }
     }
@@ -280,6 +286,7 @@ private struct RepositoryPickerView: View {
             do {
                 choose(try await sync.client.repository(name))
             } catch {
+                sync.noteAuthenticationFailure(error)
                 self.error = error.localizedDescription
             }
         }
