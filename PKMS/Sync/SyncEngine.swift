@@ -166,6 +166,7 @@ struct SyncEngine: Sendable {
             ?? SyncState(repository: repositoryID)
         defer { try? state.save(to: stateURL) }
 
+        dropSpuriousConflicts(state: &state)
         let head = try await remote.headCommit()
         if state.commit != head {
             try await pull(head: head, state: &state, report: &report, progress: progress)
@@ -265,7 +266,28 @@ struct SyncEngine: Sendable {
               let local = String(data: localData, encoding: .utf8),
               let remote = String(data: remoteData, encoding: .utf8) else { return nil }
         let base = try await baseSHA.asyncMap { String(decoding: try await download(sha: $0, for: path), as: UTF8.self) } ?? ""
-        return TextMerge.merge(base: base, local: local, remote: remote)
+        let localText = TextMerge.canonicalMarkdown(local)
+        let remoteText = TextMerge.canonicalMarkdown(remote)
+        let baseText = TextMerge.canonicalMarkdown(base)
+        if let merged = TextMerge.merge(base: baseText, local: localText, remote: remoteText) { return merged }
+        // `---` becoming an em dash (and a blank line around it) is the same note, not two authors.
+        if TextMerge.sameNote(localText, remoteText) { return localText }
+        return nil
+    }
+
+    /// Drops a saved conflict when the two copies are the same note apart from smart punctuation.
+    private func dropSpuriousConflicts(state: inout SyncState) {
+        for (path, copy) in Array(state.conflicts) {
+            let note = VaultPath(path)
+            let copyPath = VaultPath(copy)
+            guard let local = try? String(contentsOf: url(for: note), encoding: .utf8),
+                  let remote = try? String(contentsOf: url(for: copyPath), encoding: .utf8),
+                  TextMerge.sameNote(local, remote) else { continue }
+            let canonical = TextMerge.canonicalMarkdown(local)
+            try? writeFile(Data(canonical.utf8), at: note)
+            try? FileManager.default.removeItem(at: url(for: copyPath))
+            state.conflicts[path] = nil
+        }
     }
 
     /// "Note (GitHub version).md", numbered if that name is taken.

@@ -49,6 +49,35 @@ enum TextMerge {
         return result.joined(separator: "\n")
     }
 
+    /// Turns iOS smart punctuation back into the characters Markdown expects.
+    /// A line that is only an em dash or en dash is a horizontal rule (`---`).
+    static func canonicalMarkdown(_ text: String) -> String {
+        var normalized = text
+        let replacements = [
+            ("\u{2018}", "'"), ("\u{2019}", "'"),
+            ("\u{201C}", "\""), ("\u{201D}", "\""),
+            ("\u{2026}", "..."),
+        ]
+        for (fancy, plain) in replacements {
+            normalized = normalized.replacingOccurrences(of: fancy, with: plain)
+        }
+        return normalized.components(separatedBy: "\n").map { line in
+            switch line.trimmingCharacters(in: .whitespaces) {
+            case "\u{2014}", "\u{2013}": "---"
+            default: line
+            }
+        }.joined(separator: "\n")
+    }
+
+    /// Same words, ignoring spacing. Used so a rule rewritten as an em dash, or a blank line
+    /// added around it, is not treated as two devices editing the same sentence.
+    static func sameNote(_ a: String, _ b: String) -> Bool {
+        func squash(_ text: String) -> String {
+            String(text.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) })
+        }
+        return squash(canonicalMarkdown(a)) == squash(canonicalMarkdown(b))
+    }
+
     /// Whether two hunks change the same lines. Unlike git, edits on adjacent lines merge cleanly,
     /// which suits notes where neighbouring lines are often edited independently.
     private static func overlaps(_ a: Range<Int>, _ b: Range<Int>) -> Bool {

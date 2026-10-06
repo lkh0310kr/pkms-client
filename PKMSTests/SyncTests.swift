@@ -141,6 +141,15 @@ struct TextMergeTests {
         #expect(TextMerge.merge(base: "a\nb", local: "a\nlocal", remote: "a\nremote") == nil)
     }
 
+    @Test func emDashRuleIsNotAConflict() {
+        let base = "intro"
+        let remote = "intro\n\n---\n\nnext"
+        let local = "intro\n\n—\n\n\nnext"
+        #expect(TextMerge.canonicalMarkdown(local) == "intro\n\n---\n\n\nnext")
+        #expect(TextMerge.sameNote(local, remote))
+        #expect(!TextMerge.sameNote("hello", "hello there"))
+    }
+
     @Test func identicalChangesAreFine() {
         #expect(TextMerge.merge(base: "a\nb", local: "a\nc", remote: "a\nc") == "a\nc")
     }

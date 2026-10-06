@@ -469,6 +469,23 @@ final class EditorTextView: UITextView {
     var onWidthChange: (CGFloat) -> Void = { _ in }
     private var lastWidth: CGFloat = 0
 
+    // The system keyboard otherwise turns `---` into —, quotes into curly quotes, and so on.
+    // Those substitutions make a note look edited on another device the next time it syncs.
+    override var smartDashesType: UITextSmartDashesType {
+        get { .no }
+        set { super.smartDashesType = .no }
+    }
+
+    override var smartQuotesType: UITextSmartQuotesType {
+        get { .no }
+        set { super.smartQuotesType = .no }
+    }
+
+    override var smartInsertDeleteType: UITextSmartInsertDeleteType {
+        get { .no }
+        set { super.smartInsertDeleteType = .no }
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         let width = bounds.width - textContainerInset.left - textContainerInset.right - 2 * textContainer.lineFragmentPadding
