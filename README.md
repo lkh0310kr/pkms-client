@@ -1,4 +1,4 @@
-# PKMS: Markdown Vault
+# Workspace: Markdown Vault
 
 A native SwiftUI iOS/iPadOS app for a folder of Markdown files, with a live-preview editor. The files are the source of truth. The folder syncs both ways with a GitHub repository, public or private.
 

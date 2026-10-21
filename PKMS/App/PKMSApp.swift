@@ -12,7 +12,9 @@ struct PKMSApp: App {
             ?? LocalVaultRepository(rootURL: LocalVaultRepository.defaultRootURL)
         let store = VaultStore(repository: repository)
         _store = State(initialValue: store)
-        _sync = State(initialValue: SyncController(vault: store, vaultRoot: repository.rootURL))
+        let sync = SyncController(vault: store, vaultRoot: repository.rootURL)
+        _sync = State(initialValue: sync)
+        BackgroundRefresh.register(sync: sync)
     }
 
     var body: some Scene {
@@ -32,6 +34,7 @@ struct PKMSApp: App {
                     case .background:
                         // Save and upload edits before iOS suspends the app.
                         store.flushPendingEdits()
+                        if sync.repository != nil { BackgroundRefresh.schedule() }
                         guard sync.hasLocalChanges else { return }
                         let task = UIApplication.shared.beginBackgroundTask(withName: "Sync")
                         Task {
