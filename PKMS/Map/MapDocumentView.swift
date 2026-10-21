@@ -122,10 +122,17 @@ struct MapDocumentView: View {
             // No rotate gesture, like Kakao Map: pinching only zooms, so north stays up.
             Map(position: $camera, interactionModes: [.pan, .zoom, .pitch], selection: $selection) {
                 UserAnnotation()
-                ForEach(visible) { place in
-                    Marker(place.name, systemImage: "star.fill", coordinate: place.coordinate)
-                        .tint(color(for: place.folderID, in: document))
-                        .tag(MapItemID.saved(place.id))
+                ForEach(MapClustering.clusters(visible, region: visibleRegion, keeping: selectedSavedID)) { cluster in
+                    if let place = cluster.single {
+                        Marker(place.name, systemImage: "star.fill", coordinate: place.coordinate)
+                            .tint(color(for: place.folderID, in: document))
+                            .tag(MapItemID.saved(place.id))
+                    } else {
+                        Annotation("", coordinate: cluster.coordinate) {
+                            ClusterBadge(count: cluster.places.count, color: dominantColor(of: cluster, in: document))
+                                .onTapGesture { withAnimation { camera = .rect(cluster.rect) } }
+                        }
+                    }
                 }
                 ForEach(Array(search.results.enumerated()), id: \.offset) { i, item in
                     Marker(item: item).tag(MapItemID.result(i))
@@ -163,6 +170,17 @@ struct MapDocumentView: View {
     }
 
     @State private var visibleRegion: MKCoordinateRegion?
+
+    private var selectedSavedID: Int? {
+        if case .saved(let id) = selection { id } else { nil }
+    }
+
+    /// The color of the folder most of the cluster's places belong to.
+    private func dominantColor(of cluster: PlaceCluster, in document: MapDocument) -> Color {
+        let counts = Dictionary(grouping: cluster.places, by: \.folderID).mapValues(\.count)
+        let folder = counts.max { $0.value < $1.value }?.key ?? 0
+        return color(for: folder, in: document)
+    }
 
     // MARK: - Search
 
@@ -550,5 +568,22 @@ private struct PlaceCard: View {
                     .buttonStyle(.bordered)
             }
         }
+    }
+}
+
+/// A round count bubble for several places that are too close to show separately.
+struct ClusterBadge: View {
+    let count: Int
+    let color: Color
+
+    var body: some View {
+        Text("\(count)")
+            .font(.system(size: 14, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(minWidth: 34, minHeight: 34)
+            .padding(.horizontal, count > 99 ? 4 : 0)
+            .background(color.gradient, in: .capsule)
+            .overlay(Capsule().strokeBorder(.white, lineWidth: 2))
+            .shadow(radius: 2, y: 1)
     }
 }
