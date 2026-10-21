@@ -60,7 +60,6 @@ for folder in load(src / "list.md")["folders"]:
                 **({"memo": fav["memo"]} if fav.get("memo") else {}),
                 "lat": fav["lat"],
                 "lon": fav["lon"],
-                "color": fav["color"],
                 "createdAt": fav["created_at"],
                 **({"estimated": True} if estimated else {}),
                 **({"kakaoPlaceId": fav["key"]} if is_place else {}),

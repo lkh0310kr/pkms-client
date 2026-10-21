@@ -174,6 +174,7 @@ private struct FavoritesFolderView: View {
     @State private var title = ""
     @State private var moving: Moving?
     @State private var pendingDelete: MapFolder?
+    @State private var coloring: MapFolder?
 
     private enum Naming: Identifiable {
         case new
@@ -223,6 +224,9 @@ private struct FavoritesFolderView: View {
                         title = ""
                         naming = .new
                     }
+                    if let folder = folderID.flatMap({ model.document?.folder($0) }) {
+                        Button("Folder Color…", systemImage: "paintpalette") { coloring = folder }
+                    }
                     if context.userLocation != nil {
                         Toggle(isOn: $byDistance) { Label("Nearest First", systemImage: "location") }
                     }
@@ -243,6 +247,9 @@ private struct FavoritesFolderView: View {
             }
         } message: {
             Text("It will also be removed from GitHub. You can recover it from the repository’s history.")
+        }
+        .sheet(item: $coloring) { folder in
+            FolderColorPicker(model: model, folderID: folder.id)
         }
         .sheet(item: $moving) { moving in
             switch moving {
@@ -332,6 +339,8 @@ private struct FavoritesFolderView: View {
         .swipeActions(edge: .leading) {
             Button(hidden ? "Show" : "Hide", systemImage: hidden ? "eye" : "eye.slash") { toggleHidden(folder.id) }
                 .tint(.gray)
+            Button("Color", systemImage: "paintpalette") { coloring = folder }
+                .tint(MapPalette.color(for: folder.id, in: document))
         }
         .contextMenu {
             Button("Rename", systemImage: "pencil") {
@@ -339,6 +348,7 @@ private struct FavoritesFolderView: View {
                 naming = .rename(folder)
             }
             Button("Move to…", systemImage: "folder") { moving = .folder(folder) }
+            Button("Color…", systemImage: "paintpalette") { coloring = folder }
             Button(hidden ? "Show on Map" : "Hide on Map", systemImage: hidden ? "eye" : "eye.slash") { toggleHidden(folder.id) }
             Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = folder }
         }
@@ -475,5 +485,87 @@ private struct FolderPicker: View {
             }
         }
         .disabled(id == current)
+    }
+}
+
+/// Picks a folder's color. Every pin in the folder (and in subfolders that don't set their own) uses it.
+private struct FolderColorPicker: View {
+    let model: MapDocumentModel
+    let folderID: Int
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            if let document = model.document, let folder = document.folder(folderID) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 48), spacing: 14)], spacing: 14) {
+                            ForEach(MapPalette.names, id: \.self) { name in
+                                swatch(MapPalette.color(named: name), isSelected: folder.color == name,
+                                       label: name.capitalized) {
+                                    model.setFolderColor(folderID, to: name)
+                                }
+                            }
+                        }
+                        automaticRow(folder, document: document)
+                    }
+                    .padding(20)
+                }
+                .navigationTitle("“\(folder.title)” Color")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    /// Clearing the color makes the folder follow its parent (or get an automatic color at the top level).
+    private func automaticRow(_ folder: MapFolder, document: MapDocument) -> some View {
+        var inherited = folder
+        inherited.color = nil
+        var preview = document
+        if let i = preview.folders.firstIndex(where: { $0.id == folder.id }) { preview.folders[i] = inherited }
+        let color = MapPalette.color(for: folder.id, in: preview)
+        return Button {
+            model.setFolderColor(folderID, to: nil)
+        } label: {
+            HStack(spacing: 12) {
+                Circle().fill(color).frame(width: 28, height: 28)
+                    .overlay(Image(systemName: "arrow.triangle.branch").font(.caption).foregroundStyle(.white))
+                VStack(alignment: .leading) {
+                    Text(folder.parentID == nil ? "Automatic" : "Same as Parent Folder")
+                    Text("Changes along with \(folder.parentID.flatMap { document.folder($0)?.title } ?? "the folder order")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if folder.color == nil {
+                    Image(systemName: "checkmark").foregroundStyle(.tint)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func swatch(_ color: Color, isSelected: Bool, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Circle()
+                .fill(color)
+                .frame(width: 44, height: 44)
+                .overlay {
+                    if isSelected {
+                        Image(systemName: "checkmark").font(.headline).foregroundStyle(.white)
+                    }
+                }
+                .overlay(Circle().strokeBorder(.primary.opacity(isSelected ? 0.6 : 0), lineWidth: 3).padding(-5))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

@@ -97,4 +97,32 @@ struct MapDocumentTests {
         #expect(document.places.isEmpty)
         #expect(!repo.exists(path.appending("\(roastery.id).json")))
     }
+
+    @MainActor @Test func pinsTakeTheirFolderColor() async throws {
+        let repo = try makeVault()
+        let store = VaultStore(repository: repo, defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let path = VaultPath("places.map")
+        let model = MapDocumentModel(path: path, store: store)
+        await model.load()
+        let child = try #require(model.addFolder(title: "Cafés", in: 7))
+        let grandchild = try #require(model.addFolder(title: "Roasteries", in: child.id))
+
+        // Without colors, nested folders follow their top-level folder's automatic color.
+        var document = try #require(model.document)
+        #expect(MapPalette.colorName(for: grandchild.id, in: document) == MapPalette.colorName(for: 7, in: document))
+
+        model.setFolderColor(7, to: "purple")
+        model.setFolderColor(child.id, to: "green")
+        document = try await MapDocument.load(path, from: repo)
+        #expect(MapPalette.colorName(for: 7, in: document) == "purple")
+        #expect(MapPalette.colorName(for: grandchild.id, in: document) == "green")
+
+        model.setFolderColor(child.id, to: nil)
+        document = try await MapDocument.load(path, from: repo)
+        #expect(MapPalette.colorName(for: grandchild.id, in: document) == "purple")
+        // Places no longer carry a color of their own; the old field is dropped when the file is next written.
+        model.addPlace(name: "Kiosk", address: nil, memo: nil, coordinate: .init(latitude: 37.5, longitude: 127), folderID: 7)
+        #expect(!(try await repo.readText(at: path.appending("7.json"))).contains("color"))
+        #expect(model.document?.places.count == 2)
+    }
 }

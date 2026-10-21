@@ -11,7 +11,10 @@ final class MapUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        app.buttons["Places"].firstMatch.tap()
+        // Earlier tests may leave a Recent section on top that pushes the row off screen.
+        let places = app.buttons["Places"].firstMatch
+        for _ in 0..<4 where !places.waitForExistence(timeout: 2) { app.swipeUp() }
+        places.tap()
         let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow While Using App"]
         if allow.waitForExistence(timeout: 5) { allow.tap() }
         let chip = button(app, startingWith: "Seoul")
@@ -44,12 +47,23 @@ final class MapUITests: XCTestCase {
         XCTAssertTrue(button(app, startingWith: "Hongdae Coffee").waitForExistence(timeout: 3), "A folder lists its places")
 
         // Nest a new folder inside Cafés.
+        let roasteries = app.collectionViews.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Roasteries'"))
+        let before = roasteries.count
         app.buttons["More"].tap()
         app.buttons["New Folder"].tap()
         app.textFields["Name"].typeText("Roasteries")
         app.buttons["Create"].tap()
         XCTAssertTrue(button(app, startingWith: "Roasteries").waitForExistence(timeout: 3))
+        XCTAssertEqual(roasteries.count, before + 1, "Create should add exactly one folder")
         attach(app, "folder")
+
+        // Color the folder; its pins follow.
+        app.buttons["More"].tap()
+        app.buttons["Folder Color…"].tap()
+        app.buttons["Green"].tap()
+        XCTAssertTrue(app.buttons["Green"].isSelected)
+        attach(app, "color")
+        app.buttons["Done"].firstMatch.tap()
     }
 
     /// Rows and chips read as one element, e.g. "Seoul, 3" or "N Seoul Tower, 서울 용산구 …".

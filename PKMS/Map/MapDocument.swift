@@ -123,9 +123,11 @@ struct MapFolder: Codable, Identifiable, Hashable, Sendable {
     var count: Int
     /// Containing folder; `nil` for a top-level folder.
     var parentID: Int?
+    /// A `MapPalette` color name. `nil` uses the parent folder's color (or an automatic one at the top level).
+    var color: String?
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, memo, icon, count
+        case id, title, memo, icon, count, color
         case parentID = "parent"
     }
 }
@@ -137,7 +139,6 @@ struct MapPlace: Codable, Identifiable, Hashable, Sendable {
     var memo: String?
     var lat: Double
     var lon: Double
-    var color: String
     var createdAt: String
     /// Set when the position was derived from Kakao's own x/y coordinates (accurate to a few meters).
     var estimated: Bool?
@@ -148,7 +149,7 @@ struct MapPlace: Codable, Identifiable, Hashable, Sendable {
     var coordinate: CLLocationCoordinate2D { CLLocationCoordinate2D(latitude: lat, longitude: lon) }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, address, memo, lat, lon, color, createdAt, estimated, kakaoPlaceId
+        case id, name, address, memo, lat, lon, createdAt, estimated, kakaoPlaceId
     }
 }
 
@@ -186,8 +187,8 @@ final class MapDocumentModel {
                   folderID: Int) -> MapPlace? {
         guard var document else { return nil }
         let place = MapPlace(
-            id: Self.newID(), name: name, address: address.nilIfBlank, memo: memo.nilIfBlank,
-            lat: coordinate.latitude, lon: coordinate.longitude, color: "02",
+            id: newID(), name: name, address: address.nilIfBlank, memo: memo.nilIfBlank,
+            lat: coordinate.latitude, lon: coordinate.longitude,
             createdAt: Self.timestamp(), folderID: folderID
         )
         document.places.append(place)
@@ -224,7 +225,7 @@ final class MapDocumentModel {
     @discardableResult
     func addFolder(title: String, in parent: Int? = nil) -> MapFolder? {
         guard var document else { return nil }
-        let folder = MapFolder(id: Self.newID(), title: title, icon: "01", count: 0, parentID: parent)
+        let folder = MapFolder(id: newID(), title: title, icon: "01", count: 0, parentID: parent)
         document.folders.append(folder)
         commit(document, folders: [folder.id])
         return folder
@@ -244,6 +245,13 @@ final class MapDocumentModel {
         var folder = document.folders.remove(at: i)
         folder.parentID = parent
         document.folders.append(folder)
+        commit(document, folders: [])
+    }
+
+    /// Sets the folder's color; `nil` goes back to following its parent.
+    func setFolderColor(_ id: Int, to color: String?) {
+        guard var document, let i = document.folders.firstIndex(where: { $0.id == id }) else { return }
+        document.folders[i].color = color
         commit(document, folders: [])
     }
 
@@ -295,8 +303,15 @@ final class MapDocumentModel {
         }
     }
 
-    private static func newID() -> Int {
-        Int(Date.now.timeIntervalSince1970 * 1000)
+    @ObservationIgnored private var lastID = 0
+
+    /// Millisecond timestamps, bumped when two are made in the same millisecond or one is already taken.
+    private func newID() -> Int {
+        let taken = Set((document?.folders.map(\.id) ?? []) + (document?.places.map(\.id) ?? []))
+        var id = max(Int(Date.now.timeIntervalSince1970 * 1000), lastID + 1)
+        while taken.contains(id) { id += 1 }
+        lastID = id
+        return id
     }
 
     private static func timestamp() -> String {

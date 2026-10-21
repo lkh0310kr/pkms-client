@@ -412,14 +412,41 @@ struct RouteState {
     var error: String?
 }
 
+/// Folder colors, stored by name in `folders.json` so the file stays readable.
 enum MapPalette {
-    static let colors: [Color] = [.red, .blue, .green, .orange, .purple, .teal, .pink, .indigo, .brown, .mint]
+    static let names = ["red", "orange", "yellow", "green", "mint", "teal", "cyan", "blue", "indigo", "purple", "pink", "brown", "gray"]
+    /// Used, in order, for top-level folders that have no color of their own.
+    private static let automatic = ["red", "blue", "green", "orange", "purple", "teal", "pink", "indigo", "brown", "mint"]
 
-    /// Nested folders share their top-level folder's color.
-    static func color(for folderID: Int, in document: MapDocument) -> Color {
-        let top = document.ancestry(of: folderID).first?.id ?? folderID
+    static func color(named name: String) -> Color {
+        switch name {
+        case "red": .red
+        case "orange": .orange
+        case "yellow": .yellow
+        case "green": .green
+        case "mint": .mint
+        case "teal": .teal
+        case "cyan": .cyan
+        case "blue": .blue
+        case "indigo": .indigo
+        case "purple": .purple
+        case "pink": .pink
+        case "brown": .brown
+        default: .gray
+        }
+    }
+
+    /// The folder's own color, else the nearest parent's, else an automatic one for its top-level folder.
+    static func colorName(for folderID: Int, in document: MapDocument) -> String {
+        let chain = document.ancestry(of: folderID)
+        if let named = chain.reversed().lazy.compactMap(\.color).first(where: names.contains) { return named }
+        let top = chain.first?.id ?? folderID
         let index = document.children(of: nil).firstIndex { $0.id == top } ?? 0
-        return colors[index % colors.count]
+        return automatic[index % automatic.count]
+    }
+
+    static func color(for folderID: Int, in document: MapDocument) -> Color {
+        color(named: colorName(for: folderID, in: document))
     }
 }
 
