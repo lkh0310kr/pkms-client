@@ -98,6 +98,31 @@ struct MapDocumentTests {
         #expect(!repo.exists(path.appending("\(roastery.id).json")))
     }
 
+    @Test func filterTurnsWholeSubtreesOnAndOff() {
+        let document = MapDocument(folders: [
+            MapFolder(id: 1, title: "대구", icon: "01", count: 0),
+            MapFolder(id: 2, title: "음식점", icon: "01", count: 0, parentID: 1),
+            MapFolder(id: 3, title: "서점", icon: "01", count: 0, parentID: 1),
+            MapFolder(id: 4, title: "서울", icon: "01", count: 0),
+        ], places: [])
+        var hidden: Set<Int> = []
+
+        document.toggleVisibility(of: 1, in: &hidden)
+        #expect(hidden == [1, 2, 3])
+        #expect(document.visibility(of: 1, hidden: hidden) == .hidden)
+
+        // Turning one subfolder back on leaves the parent partly on.
+        document.toggleVisibility(of: 2, in: &hidden)
+        #expect(hidden == [1, 3])
+        #expect(document.visibility(of: 1, hidden: hidden) == .mixed)
+        #expect(document.visibility(of: 2, hidden: hidden) == .shown)
+
+        // Tapping a partly-on folder turns all of it on.
+        document.toggleVisibility(of: 1, in: &hidden)
+        #expect(hidden.isEmpty)
+        #expect(document.visibility(of: 4, hidden: hidden) == .shown)
+    }
+
     @MainActor @Test func pinsTakeTheirFolderColor() async throws {
         let repo = try makeVault()
         let store = VaultStore(repository: repo, defaults: UserDefaults(suiteName: UUID().uuidString)!)

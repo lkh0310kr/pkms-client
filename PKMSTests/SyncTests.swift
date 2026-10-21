@@ -317,6 +317,53 @@ struct SyncEngineTests {
         #expect(read("n (GitHub version).md") == nil)
     }
 
+    @Test func mapFilesMergeByID() async throws {
+        defer { cleanUp() }
+        let path = "Places.map/folders.json"
+        remote.files = [path: #"{"folders":[{"id":1,"title":"대구"},{"id":2,"title":"서울"}]}"#]
+        _ = try await engine().sync()
+
+        // The phone colors a folder while another device adds one and renames another.
+        try write(path, #"{"folders":[{"id":1,"title":"대구","color":"green"},{"id":2,"title":"서울"}]}"#)
+        remote.commit([path: #"{"folders":[{"id":1,"title":"대구"},{"id":3,"title":"음식점"},{"id":2,"title":"Seoul"}]}"#])
+        let report = try await engine().sync()
+
+        #expect(report.conflicts.isEmpty)
+        #expect(report.merged == [VaultPath(path)])
+        let merged = try JSONSerialization.jsonObject(with: Data(try #require(remote.files[path]).utf8)) as? [String: [[String: Any]]]
+        let folders = try #require(merged?["folders"])
+        #expect(folders.map { $0["title"] as? String } == ["대구", "음식점", "Seoul"])
+        #expect(folders[0]["color"] as? String == "green")
+    }
+
+    @Test func mapRecordsDeletedOnOneSideStayDeleted() throws {
+        let base = Data(#"[{"id":1,"name":"A"},{"id":2,"name":"B"}]"#.utf8)
+        let local = Data(#"[{"id":1,"name":"A"}]"#.utf8)
+        let remote = Data(#"[{"id":1,"name":"A"},{"id":2,"name":"B"},{"id":3,"name":"C"}]"#.utf8)
+        let merged = try #require(MapMerge.merge(base: base, local: local, remote: remote))
+        let names = (try JSONSerialization.jsonObject(with: merged) as? [[String: Any]])?.map { $0["name"] as? String }
+        #expect(names == ["A", "C"])
+    }
+
+    @Test func oldMapConflictsAreCombinedOnNextSync() async throws {
+        defer { cleanUp() }
+        let path = "Places.map/folders.json"
+        remote.files = [path: #"{"folders":[{"id":1,"title":"대구"},{"id":2,"title":"서울"}]}"#]
+        _ = try await engine().sync()
+        // A conflict saved by an older version: the phone's file plus GitHub's copy next to it.
+        try write(path, #"{"folders":[{"id":1,"title":"대구","color":"green"}]}"#)
+        try write("Places.map/folders (GitHub version).json", #"{"folders":[{"id":1,"title":"대구"},{"id":2,"title":"서울"}]}"#)
+        var state = try #require(SyncState.load(from: stateURL))
+        state.conflicts[path] = "Places.map/folders (GitHub version).json"
+        try state.save(to: stateURL)
+
+        _ = try await engine().sync()
+        #expect(SyncState.load(from: stateURL)?.conflicts.isEmpty == true)
+        #expect(read("Places.map/folders (GitHub version).json") == nil)
+        let uploaded = try #require(remote.files[path])
+        #expect(uploaded.contains("green") && uploaded.contains("서울"))
+    }
+
     @Test func conflictResolutionKeepRemote() async throws {
         defer { cleanUp() }
         remote.files = ["n.md": "hello"]

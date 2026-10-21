@@ -238,8 +238,8 @@ struct SyncEngine: Sendable {
 
         for (path, remoteSHA) in merges {
             let remoteData = try await download(sha: remoteSHA, for: path)
-            if let merged = try await mergedText(at: path, remote: remoteData, baseSHA: base[path]) {
-                try writeFile(Data(merged.utf8), at: path)
+            if let merged = try await mergedData(at: path, remote: remoteData, baseSHA: base[path]) {
+                try writeFile(merged, at: path)
                 report.merged.append(path)
             } else {
                 let copy = conflictCopyPath(for: path)
@@ -260,6 +260,15 @@ struct SyncEngine: Sendable {
         return data
     }
 
+    private func mergedData(at path: VaultPath, remote remoteData: Data, baseSHA: String?) async throws -> Data? {
+        if MapMerge.handles(path) {
+            guard let localData = try? Data(contentsOf: url(for: path)) else { return nil }
+            let baseData = try await baseSHA.asyncMap { try await download(sha: $0, for: path) }
+            return MapMerge.merge(base: baseData, local: localData, remote: remoteData)
+        }
+        return try await mergedText(at: path, remote: remoteData, baseSHA: baseSHA).map { Data($0.utf8) }
+    }
+
     private func mergedText(at path: VaultPath, remote remoteData: Data, baseSHA: String?) async throws -> String? {
         guard Self.mergeableExtensions.contains(path.pathExtension),
               let localData = try? Data(contentsOf: url(for: path)),
@@ -275,11 +284,22 @@ struct SyncEngine: Sendable {
         return nil
     }
 
-    /// Drops a saved conflict when the two copies are the same note apart from smart punctuation.
+    /// Drops a saved conflict when the two copies are the same note apart from smart punctuation,
+    /// or when it is a map file, which can always be combined.
     private func dropSpuriousConflicts(state: inout SyncState) {
         for (path, copy) in Array(state.conflicts) {
             let note = VaultPath(path)
             let copyPath = VaultPath(copy)
+            // Map files merge by id; conflicts saved before that existed are combined here.
+            if MapMerge.handles(note),
+               let local = try? Data(contentsOf: url(for: note)),
+               let remote = try? Data(contentsOf: url(for: copyPath)),
+               let merged = MapMerge.merge(base: nil, local: local, remote: remote) {
+                try? writeFile(merged, at: note)
+                try? FileManager.default.removeItem(at: url(for: copyPath))
+                state.conflicts[path] = nil
+                continue
+            }
             guard let local = try? String(contentsOf: url(for: note), encoding: .utf8),
                   let remote = try? String(contentsOf: url(for: copyPath), encoding: .utf8),
                   TextMerge.sameNote(local, remote) else { continue }

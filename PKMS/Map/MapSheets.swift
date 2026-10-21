@@ -316,7 +316,7 @@ private struct FavoritesFolderView: View {
     }
 
     private func folderRow(_ folder: MapFolder, document: MapDocument) -> some View {
-        let hidden = context.hiddenFolders.wrappedValue.contains(folder.id)
+        let hidden = document.visibility(of: folder.id, hidden: context.hiddenFolders.wrappedValue) == .hidden
         return NavigationLink(value: FavoritesRoute(folderID: folder.id)) {
             HStack {
                 Image(systemName: "folder.fill").foregroundStyle(MapPalette.color(for: folder.id, in: document))
@@ -396,11 +396,7 @@ private struct FavoritesFolderView: View {
     }
 
     private func toggleHidden(_ id: Int) {
-        if context.hiddenFolders.wrappedValue.contains(id) {
-            context.hiddenFolders.wrappedValue.remove(id)
-        } else {
-            context.hiddenFolders.wrappedValue.insert(id)
-        }
+        model.document?.toggleVisibility(of: id, in: &context.hiddenFolders.wrappedValue)
     }
 
     private func commitNaming() {
@@ -567,5 +563,70 @@ private struct FolderColorPicker: View {
         .buttonStyle(.plain)
         .accessibilityLabel(label)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+/// Which folders' pins show on the map, as the whole folder tree. Turning a folder off turns off
+/// everything nested in it; a folder with only some subfolders on shows as partly on.
+struct FolderFilterView: View {
+    let model: MapDocumentModel
+    @Binding var hiddenFolders: Set<Int>
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            if let document = model.document {
+                List {
+                    ForEach(document.outline(), id: \.folder.id) { folder, depth in
+                        row(folder, depth: depth, document: document)
+                    }
+                }
+                .navigationTitle("Show on Map")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        if hiddenFolders.isEmpty {
+                            Button("Hide All") { hiddenFolders = Set(document.folders.map(\.id)) }
+                        } else {
+                            Button("Show All") { hiddenFolders = [] }
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        // Keep the map usable above the sheet so the pins can be seen changing.
+        .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+    }
+
+    private func row(_ folder: MapFolder, depth: Int, document: MapDocument) -> some View {
+        let visibility = document.visibility(of: folder.id, hidden: hiddenFolders)
+        let symbol = switch visibility {
+        case .shown: "checkmark.circle.fill"
+        case .mixed: "minus.circle.fill"
+        case .hidden: "circle"
+        }
+        return Button {
+            document.toggleVisibility(of: folder.id, in: &hiddenFolders)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.title3)
+                    .foregroundStyle(visibility == .hidden ? AnyShapeStyle(.secondary)
+                                     : AnyShapeStyle(MapPalette.color(for: folder.id, in: document)))
+                Text(folder.title)
+                    .foregroundStyle(visibility == .hidden ? .secondary : .primary)
+                Spacer()
+                Text("\(document.placeCount(under: folder.id))").foregroundStyle(.secondary)
+            }
+            .padding(.leading, CGFloat(depth) * 22)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(visibility == .shown ? "On" : visibility == .hidden ? "Off" : "Partly On")
     }
 }

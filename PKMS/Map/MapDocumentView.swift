@@ -19,6 +19,7 @@ struct MapDocumentView: View {
     @State private var travelMode: TravelMode = .driving
     @State private var draft: PlaceDraft?
     @State private var showsFavorites = false
+    @State private var showsFilter = false
     @State private var pendingDelete: MapPlace?
 
     var body: some View {
@@ -38,7 +39,13 @@ struct MapDocumentView: View {
             if model == nil { model = MapDocumentModel(path: path, store: store) }
             await model?.load()
         }
-        .onAppear { location.start() }
+        .onAppear {
+            location.start()
+            hiddenFolders = Set(UserDefaults.standard.array(forKey: hiddenFoldersKey) as? [Int] ?? [])
+        }
+        .onChange(of: hiddenFolders) { _, new in
+            UserDefaults.standard.set(new.sorted(), forKey: hiddenFoldersKey)
+        }
         .onDisappear { location.stop() }
     }
 
@@ -59,6 +66,12 @@ struct MapDocumentView: View {
                     Button("Add Place Here", systemImage: "mappin.and.ellipse") { dropPinAtCenter() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button("Filter", systemImage: hiddenFolders.isEmpty
+                           ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill") {
+                        showsFilter = true
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button("Favorites", systemImage: "star") { showsFavorites = true }
                 }
             }
@@ -66,6 +79,9 @@ struct MapDocumentView: View {
                 PlaceEditor(draft: draft, model: model) { saved in
                     if let saved { focus(on: saved) }
                 }
+            }
+            .sheet(isPresented: $showsFilter) {
+                FolderFilterView(model: model, hiddenFolders: $hiddenFolders)
             }
             .sheet(isPresented: $showsFavorites) {
                 FavoritesView(model: model, userLocation: location.location, hiddenFolders: $hiddenFolders) { place in
@@ -143,9 +159,6 @@ struct MapDocumentView: View {
                     }
             )
         }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if query.isEmpty { folderChips(document) }
-        }
         .safeAreaInset(edge: .bottom, spacing: 0) { bottomPanel(model, document) }
     }
 
@@ -213,36 +226,6 @@ struct MapDocumentView: View {
     private func clearSearch() {
         search.clear()
         if case .result = selection { selection = nil }
-    }
-
-    // MARK: - Folder chips
-
-    private func folderChips(_ document: MapDocument) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(document.children(of: nil)) { folder in
-                    let isOn = !hiddenFolders.contains(folder.id)
-                    Button {
-                        if isOn { hiddenFolders.insert(folder.id) } else { hiddenFolders.remove(folder.id) }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Circle().fill(color(for: folder.id, in: document)).frame(width: 9, height: 9)
-                            Text(folder.title)
-                            Text("\(document.placeCount(under: folder.id))").foregroundStyle(.secondary)
-                        }
-                        .font(.subheadline)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(isOn ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(.clear), in: .capsule)
-                        .overlay(Capsule().strokeBorder(.secondary.opacity(isOn ? 0 : 0.5)))
-                        .opacity(isOn ? 1 : 0.6)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-        }
     }
 
     // MARK: - Bottom panel
@@ -347,7 +330,7 @@ struct MapDocumentView: View {
     private func focus(on place: MapPlace) {
         query = ""
         isSearchPresented = false
-        hiddenFolders.subtract(document(model)?.ancestry(of: place.folderID).map(\.id) ?? [])
+        hiddenFolders.remove(place.folderID)
         withAnimation {
             camera = .region(MKCoordinateRegion(center: place.coordinate, latitudinalMeters: 700, longitudinalMeters: 700))
         }
@@ -390,13 +373,13 @@ struct MapDocumentView: View {
         MapPalette.color(for: folderID, in: document)
     }
 
-    /// Hiding a folder also hides everything nested in it.
+    /// Each folder is turned on or off on its own; the filter turns a whole subtree at once.
     private func isHidden(_ folderID: Int, in document: MapDocument) -> Bool {
-        document.ancestry(of: folderID).contains { hiddenFolders.contains($0.id) }
+        hiddenFolders.contains(folderID)
     }
 
-    private func document(_ model: MapDocumentModel?) -> MapDocument? { model?.document }
-}
+    /// The filter is remembered per map on this device.
+    private var hiddenFoldersKey: String { "map.hiddenFolders.\(path.string)" }}
 
 enum MapItemID: Hashable {
     case saved(Int)

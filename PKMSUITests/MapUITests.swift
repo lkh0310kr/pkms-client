@@ -17,9 +17,20 @@ final class MapUITests: XCTestCase {
         places.tap()
         let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow While Using App"]
         if allow.waitForExistence(timeout: 5) { allow.tap() }
-        let chip = button(app, startingWith: "Seoul")
-        XCTAssertTrue(chip.waitForExistence(timeout: 5), "Group chips should show")
+        XCTAssertTrue(app.buttons["Filter"].waitForExistence(timeout: 5))
         attach(app, "map")
+
+        // The filter lists the whole folder tree; turning a folder off hides its pins.
+        app.buttons["Filter"].tap()
+        let seoul = app.collectionViews.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Seoul")).firstMatch
+        XCTAssertTrue(seoul.waitForExistence(timeout: 3), "Filter lists the folders")
+        XCTAssertEqual(seoul.value as? String, "On")
+        seoul.tap()
+        XCTAssertEqual(seoul.value as? String, "Off")
+        attach(app, "filter")
+        app.buttons["Show All"].tap()
+        XCTAssertEqual(seoul.value as? String, "On")
+        app.buttons["Done"].firstMatch.tap()
 
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 3))
@@ -31,7 +42,7 @@ final class MapUITests: XCTestCase {
         saved.tap()
 
         XCTAssertTrue(app.buttons["Directions"].waitForExistence(timeout: 5), "Selecting a place shows its card")
-        XCTAssertTrue(app.staticTexts["서울 용산구 남산공원길 105"].exists)
+        XCTAssertTrue(app.staticTexts["서울 용산구 남산공원길 105"].waitForExistence(timeout: 3))
         attach(app, "card")
 
         app.buttons["Edit"].firstMatch.tap()

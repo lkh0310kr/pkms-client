@@ -76,6 +76,24 @@ struct MapDocument: Sendable {
         return result
     }
 
+    // MARK: - Visibility
+
+    /// Whether a folder's pins show on the map: all of its subtree, none of it, or some.
+    enum Visibility { case shown, hidden, mixed }
+
+    /// `hidden` holds each folder whose own places are turned off.
+    func visibility(of id: Int, hidden: Set<Int>) -> Visibility {
+        let ids = subtree(of: id)
+        let off = ids.intersection(hidden).count
+        return off == 0 ? .shown : off == ids.count ? .hidden : .mixed
+    }
+
+    /// Turns a fully shown folder off with everything in it; otherwise turns it all back on.
+    func toggleVisibility(of id: Int, in hidden: inout Set<Int>) {
+        let ids = subtree(of: id)
+        if visibility(of: id, hidden: hidden) == .shown { hidden.formUnion(ids) } else { hidden.subtract(ids) }
+    }
+
     static func load(_ path: VaultPath, from repository: any VaultRepository) async throws -> MapDocument {
         struct Index: Decodable { var folders: [MapFolder] }
         let decoder = JSONDecoder()
