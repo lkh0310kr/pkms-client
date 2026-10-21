@@ -104,7 +104,8 @@ struct MapDocumentView: View {
     private func mapView(_ model: MapDocumentModel, _ document: MapDocument) -> some View {
         let visible = document.places.filter { !hiddenFolders.contains($0.folderID) }
         return MapReader { proxy in
-            Map(position: $camera, selection: $selection) {
+            // No rotate gesture, like Kakao Map: pinching only zooms, so north stays up.
+            Map(position: $camera, interactionModes: [.pan, .zoom, .pitch], selection: $selection) {
                 UserAnnotation()
                 ForEach(visible) { place in
                     Marker(place.name, systemImage: "star.fill", coordinate: place.coordinate)
@@ -125,7 +126,6 @@ struct MapDocumentView: View {
             }
             .mapControls {
                 MapUserLocationButton()
-                MapCompass()
                 MapPitchToggle()
                 MapScaleView()
             }
