@@ -14,6 +14,7 @@ struct MapDocumentView: View {
     @State private var hiddenFolders: Set<Int> = []
     @State private var selection: MapItemID?
     @State private var camera: MapCameraPosition = .automatic
+    @State private var didFitCamera = false
     @State private var droppedPin: CLLocationCoordinate2D?
     @State private var route: RouteState?
     @State private var travelMode: TravelMode = .driving
@@ -38,6 +39,7 @@ struct MapDocumentView: View {
         .task(id: store.revision) {
             if model == nil { model = MapDocumentModel(path: path, store: store) }
             await model?.load()
+            if !didFitCamera, let document = model?.document { fitCamera(to: document) }
         }
         .onAppear {
             location.start()
@@ -358,6 +360,18 @@ struct MapDocumentView: View {
             try? await Task.sleep(for: .milliseconds(350))
             selection = .saved(place.id)
         }
+    }
+
+    /// Frames every saved place once, then leaves the camera alone. An `.automatic` camera keeps
+    /// re-fitting to the pins on screen, which fights the clustering (pins change with the zoom) and never settles.
+    private func fitCamera(to document: MapDocument) {
+        didFitCamera = true
+        guard !document.places.isEmpty else { return }
+        let rect = document.places.reduce(MKMapRect.null) { rect, place in
+            let point = MKMapPoint(place.coordinate)
+            return rect.union(MKMapRect(x: point.x, y: point.y, width: 0, height: 0))
+        }
+        camera = .rect(rect.insetBy(dx: -rect.width * 0.1 - 2000, dy: -rect.height * 0.1 - 2000))
     }
 
     private func dropPin(at coordinate: CLLocationCoordinate2D) {
