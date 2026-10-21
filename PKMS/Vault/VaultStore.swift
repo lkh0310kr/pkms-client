@@ -105,9 +105,10 @@ final class VaultStore {
     @discardableResult
     func rename(_ path: VaultPath, to name: String) async throws -> VaultPath {
         let node = index.node(at: path)
+        let isMap = node?.kind == .map || path.isMap
         let isNote = node?.kind == .markdown || path.isMarkdown
-        let base = Self.fileName(from: name, fallback: isNote ? "Untitled" : "New Folder")
-        let newName = isNote ? base + "." + (path.pathExtension.isEmpty ? "md" : path.pathExtension) : base
+        let base = Self.fileName(from: name, fallback: isNote ? "Untitled" : isMap ? "Map" : "New Folder")
+        let newName = isNote || isMap ? base + "." + (path.pathExtension.isEmpty ? "md" : path.pathExtension) : base
         let destination = path.parent.appending(newName)
         guard destination != path else { return path }
         flushPendingEdits()

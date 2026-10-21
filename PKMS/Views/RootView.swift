@@ -24,6 +24,15 @@ struct RootView: View {
     /// Documents opened by following links from the selected document.
     @State private var linkedDocuments: [VaultPath] = []
 
+    @ViewBuilder
+    private func destination(for path: VaultPath) -> some View {
+        if path.isMap {
+            MapDocumentView(path: path)
+        } else {
+            DocumentView(path: path)
+        }
+    }
+
     var body: some View {
         NavigationSplitView {
             NavigationStack(path: $folderStack) {
@@ -36,13 +45,13 @@ struct RootView: View {
             NavigationStack(path: $linkedDocuments) {
                 Group {
                     if let selection {
-                        DocumentView(path: selection).id(selection)
+                        destination(for: selection).id(selection)
                     } else {
                         ContentUnavailableView("No Document Selected", systemImage: "doc.text",
                                                description: Text("Choose a note from the sidebar."))
                     }
                 }
-                .navigationDestination(for: VaultPath.self) { DocumentView(path: $0) }
+                .navigationDestination(for: VaultPath.self) { destination(for: $0) }
             }
             .environment(\.openDocument, OpenDocumentAction { linkedDocuments.append($0) })
         }

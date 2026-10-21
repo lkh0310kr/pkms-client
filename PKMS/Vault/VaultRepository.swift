@@ -100,6 +100,10 @@ struct LocalVaultRepository: VaultRepository {
         for entry in entries where !Self.ignoredNames.contains(entry.lastPathComponent) {
             let childPath = path.appending(entry.lastPathComponent)
             if try entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
+                if childPath.isMap {
+                    children.append(VaultNode(path: childPath, kind: .map))
+                    continue
+                }
                 children.append(try scanFolder(at: entry, path: childPath))
             } else {
                 children.append(VaultNode(path: childPath, kind: childPath.isMarkdown ? .markdown : .asset))

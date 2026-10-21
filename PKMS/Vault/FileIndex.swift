@@ -2,7 +2,7 @@ import Foundation
 
 /// A file or folder in the vault.
 struct VaultNode: Identifiable, Hashable, Sendable {
-    enum Kind: Sendable { case folder, markdown, asset }
+    enum Kind: Sendable { case folder, markdown, asset, map }
 
     let path: VaultPath
     let kind: Kind
@@ -12,10 +12,10 @@ struct VaultNode: Identifiable, Hashable, Sendable {
     var id: VaultPath { path }
     var name: String { path.name }
 
-    /// Name shown in the UI: Markdown files drop their extension.
+    /// Name shown in the UI: Markdown files and maps drop their extension.
     var displayName: String {
         if path.isRoot { return "Vault" }
-        return kind == .markdown ? path.baseName : path.name
+        return kind == .markdown || kind == .map ? path.baseName : path.name
     }
 
     var isFolder: Bool { kind == .folder }
@@ -24,7 +24,7 @@ struct VaultNode: Identifiable, Hashable, Sendable {
     /// or contain documents. Asset-only folders (e.g. `Assets/`) are hidden.
     var isBrowsable: Bool {
         switch kind {
-        case .markdown: true
+        case .markdown, .map: true
         case .asset: false
         case .folder: children.isEmpty || children.contains { $0.isBrowsable }
         }

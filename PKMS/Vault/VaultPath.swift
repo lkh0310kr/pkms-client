@@ -57,6 +57,9 @@ struct VaultPath: Hashable, Sendable, Comparable, CustomStringConvertible {
         return VaultPath(components: new.components + components.dropFirst(old.components.count))
     }
 
+    /// A `*.map` folder holding places; the app opens it as a map instead of browsing into it.
+    var isMap: Bool { pathExtension == "map" }
+
     var isMarkdown: Bool { ["md", "markdown"].contains(pathExtension) }
 
     static func < (lhs: VaultPath, rhs: VaultPath) -> Bool {

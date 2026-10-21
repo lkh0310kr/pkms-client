@@ -182,7 +182,7 @@ struct FolderView: View {
                 Label {
                     Text(child.displayName)
                 } icon: {
-                    Image(systemName: sync.conflicts[child.path] != nil ? "exclamationmark.triangle" : "doc.text")
+                    Image(systemName: sync.conflicts[child.path] != nil ? "exclamationmark.triangle" : child.kind == .map ? "map" : "doc.text")
                         .foregroundStyle(sync.conflicts[child.path] != nil ? AnyShapeStyle(.orange) : AnyShapeStyle(.tint))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
