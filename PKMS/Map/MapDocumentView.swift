@@ -120,21 +120,24 @@ struct MapDocumentView: View {
 
     private func mapView(_ model: MapDocumentModel, _ document: MapDocument) -> some View {
         let visible = document.places.filter { !isHidden($0.folderID, in: document) }
+        let shown = MapDeclutter.shownIDs(visible, region: visibleRegion, keeping: selectedSavedID)
+        let showsNames = (visibleRegion?.span.latitudeDelta ?? 1) <= MapDeclutter.pinSpan
         return MapReader { proxy in
             // No rotate gesture, like Kakao Map: pinching only zooms, so north stays up.
             Map(position: $camera, interactionModes: [.pan, .zoom, .pitch], selection: $selection) {
                 UserAnnotation()
-                ForEach(MapClustering.clusters(visible, region: visibleRegion, keeping: selectedSavedID)) { cluster in
-                    if let place = cluster.single {
-                        Marker(place.name, systemImage: "star.fill", coordinate: place.coordinate)
-                            .tint(color(for: place.folderID, in: document))
-                            .tag(MapItemID.saved(place.id))
-                    } else {
-                        Annotation("", coordinate: cluster.coordinate) {
-                            ClusterBadge(count: cluster.places.count, color: dominantColor(of: cluster, in: document))
-                                .onTapGesture { withAnimation { camera = .rect(cluster.rect) } }
-                        }
+                ForEach(visible) { place in
+                    Annotation(place.name, coordinate: place.coordinate, anchor: .center) {
+                        PlacePin(
+                            name: place.name,
+                            color: color(for: place.folderID, in: document),
+                            isShown: shown.contains(place.id),
+                            isSelected: selectedSavedID == place.id,
+                            showsName: showsNames
+                        )
                     }
+                    .annotationTitles(.hidden)
+                    .tag(MapItemID.saved(place.id))
                 }
                 ForEach(Array(search.results.enumerated()), id: \.offset) { i, item in
                     Marker(item: item).tag(MapItemID.result(i))
@@ -177,12 +180,6 @@ struct MapDocumentView: View {
         if case .saved(let id) = selection { id } else { nil }
     }
 
-    /// The color of the folder most of the cluster's places belong to.
-    private func dominantColor(of cluster: PlaceCluster, in document: MapDocument) -> Color {
-        let counts = Dictionary(grouping: cluster.places, by: \.folderID).mapValues(\.count)
-        let folder = counts.max { $0.value < $1.value }?.key ?? 0
-        return color(for: folder, in: document)
-    }
 
     // MARK: - Search
 
@@ -585,19 +582,36 @@ private struct PlaceCard: View {
     }
 }
 
-/// A round count bubble for several places that are too close to show separately.
-struct ClusterBadge: View {
-    let count: Int
+/// A saved place's pin. Pins fade and shrink away instead of popping out when `MapDeclutter` drops them.
+struct PlacePin: View {
+    let name: String
     let color: Color
+    let isShown: Bool
+    let isSelected: Bool
+    let showsName: Bool
 
     var body: some View {
-        Text("\(count)")
-            .font(.system(size: 14, weight: .bold))
-            .foregroundStyle(.white)
-            .frame(minWidth: 34, minHeight: 34)
-            .padding(.horizontal, count > 99 ? 4 : 0)
-            .background(color.gradient, in: .capsule)
-            .overlay(Capsule().strokeBorder(.white, lineWidth: 2))
-            .shadow(radius: 2, y: 1)
+        VStack(spacing: 2) {
+            Image(systemName: "star.fill")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(color.gradient, in: .circle)
+                .overlay(Circle().strokeBorder(.white, lineWidth: 2))
+                .shadow(radius: 2, y: 1)
+                .scaleEffect(isSelected ? 1.3 : 1)
+            if showsName || isSelected {
+                Text(name)
+                    .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+                    .padding(.horizontal, 4)
+                    .background(.background.opacity(0.75), in: .capsule)
+                    .frame(maxWidth: 110)
+            }
+        }
+        .opacity(isShown ? 1 : 0)
+        .scaleEffect(isShown ? 1 : 0.4)
+        .animation(.easeInOut(duration: 0.25), value: isShown)
+        .allowsHitTesting(isShown)
     }
 }
