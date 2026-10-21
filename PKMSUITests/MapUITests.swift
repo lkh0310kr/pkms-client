@@ -36,10 +36,20 @@ final class MapUITests: XCTestCase {
         attach(app, "editor")
         app.buttons["Cancel"].tap()
 
+        app.buttons["Favorites"].tap()
+        let cafes = app.collectionViews.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Cafés")).firstMatch
+        XCTAssertTrue(cafes.waitForExistence(timeout: 3), "Favorites lists the top-level folders")
+        attach(app, "favorites")
+        cafes.tap()
+        XCTAssertTrue(button(app, startingWith: "Hongdae Coffee").waitForExistence(timeout: 3), "A folder lists its places")
+
+        // Nest a new folder inside Cafés.
         app.buttons["More"].tap()
-        app.buttons["Saved Places"].tap()
-        XCTAssertTrue(button(app, startingWith: "Hongdae Coffee").waitForExistence(timeout: 3))
-        attach(app, "list")
+        app.buttons["New Folder"].tap()
+        app.textFields["Name"].typeText("Roasteries")
+        app.buttons["Create"].tap()
+        XCTAssertTrue(button(app, startingWith: "Roasteries").waitForExistence(timeout: 3))
+        attach(app, "folder")
     }
 
     /// Rows and chips read as one element, e.g. "Seoul, 3" or "N Seoul Tower, 서울 용산구 …".

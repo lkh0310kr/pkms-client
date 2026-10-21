@@ -51,15 +51,15 @@ struct PlaceEditor: View {
                     TextField("Notes about this place", text: $draft.memo, axis: .vertical)
                         .lineLimit(3...8)
                 }
-                Section("Group") {
-                    Picker("Group", selection: $draft.folderID) {
-                        ForEach(model.document?.folders ?? []) { folder in
-                            Text(folder.title).tag(folder.id)
+                Section("Folder") {
+                    Picker("Folder", selection: $draft.folderID) {
+                        ForEach(model.document?.outline() ?? [], id: \.folder.id) { entry in
+                            Text(String(repeating: "    ", count: entry.depth) + entry.folder.title).tag(entry.folder.id)
                         }
                     }
                     .pickerStyle(.inline)
                     .labelsHidden()
-                    Button("New Group", systemImage: "folder.badge.plus") { addingFolder = true }
+                    Button("New Folder", systemImage: "folder.badge.plus") { addingFolder = true }
                 }
                 Section {
                     LabeledContent("Coordinates",
@@ -84,13 +84,19 @@ struct PlaceEditor: View {
                                   || model.document?.folder(draft.folderID) == nil)
                 }
             }
-            .alert("New Group", isPresented: $addingFolder) {
+            .alert("New Folder", isPresented: $addingFolder) {
                 TextField("Name", text: $newFolderTitle)
                 Button("Cancel", role: .cancel) { newFolderTitle = "" }
                 Button("Create") {
                     let title = newFolderTitle.trimmingCharacters(in: .whitespaces)
                     newFolderTitle = ""
-                    if !title.isEmpty, let folder = model.addFolder(title: title) { draft.folderID = folder.id }
+                    // Created next to the folder currently chosen, inside the same parent.
+                    let parent = model.document?.folder(draft.folderID)?.parentID
+                    if !title.isEmpty, let folder = model.addFolder(title: title, in: parent) { draft.folderID = folder.id }
+                }
+            } message: {
+                if let parent = model.document?.folder(draft.folderID)?.parentID, let document = model.document {
+                    Text("In \(document.pathTitle(of: parent))")
                 }
             }
             .confirmationDialog("Delete “\(draft.name)”?", isPresented: $confirmingDelete, titleVisibility: .visible) {
@@ -121,67 +127,235 @@ struct PlaceEditor: View {
     }
 }
 
-/// Every saved place, grouped, searchable and sortable by distance.
-struct PlaceList: View {
+/// Favorites: folders nested to any depth with the places in them. Browse, search, edit, move,
+/// hide on the map and delete, all in one place.
+struct FavoritesView: View {
     let model: MapDocumentModel
     let userLocation: CLLocation?
+    @Binding var hiddenFolders: Set<Int>
     let select: (MapPlace) -> Void
     let edit: (MapPlace) -> Void
+
+    var body: some View {
+        NavigationStack {
+            FavoritesFolderView(folderID: nil, context: context)
+                .navigationDestination(for: FavoritesRoute.self) { route in
+                    FavoritesFolderView(folderID: route.folderID, context: context)
+                }
+        }
+    }
+
+    private var context: FavoritesContext {
+        FavoritesContext(model: model, userLocation: userLocation, hiddenFolders: $hiddenFolders, select: select, edit: edit)
+    }
+}
+
+private struct FavoritesRoute: Hashable {
+    let folderID: Int
+}
+
+private struct FavoritesContext {
+    let model: MapDocumentModel
+    let userLocation: CLLocation?
+    let hiddenFolders: Binding<Set<Int>>
+    let select: (MapPlace) -> Void
+    let edit: (MapPlace) -> Void
+}
+
+/// One level of Favorites: its subfolders, then its places. The top level also searches everything.
+private struct FavoritesFolderView: View {
+    let folderID: Int?
+    let context: FavoritesContext
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var byDistance = false
+    @State private var naming: Naming?
+    @State private var title = ""
+    @State private var moving: Moving?
+    @State private var pendingDelete: MapFolder?
+
+    private enum Naming: Identifiable {
+        case new
+        case rename(MapFolder)
+        var id: String {
+            switch self {
+            case .new: "new"
+            case .rename(let folder): "rename-\(folder.id)"
+            }
+        }
+    }
+
+    private enum Moving: Identifiable {
+        case folder(MapFolder)
+        case place(MapPlace)
+        var id: String {
+            switch self {
+            case .folder(let folder): "folder-\(folder.id)"
+            case .place(let place): "place-\(place.id)"
+            }
+        }
+    }
+
+    private var model: MapDocumentModel { context.model }
 
     var body: some View {
-        NavigationStack {
+        Group {
+            if let document = model.document {
+                if folderID == nil {
+                    list(document).searchable(text: $query, prompt: "Search favorites")
+                } else {
+                    list(document)
+                }
+            }
+        }
+        .navigationTitle(folderID.flatMap { model.document?.folder($0)?.title } ?? "Favorites")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if folderID == nil {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu("More", systemImage: "ellipsis.circle") {
+                    Button("New Folder", systemImage: "folder.badge.plus") {
+                        title = ""
+                        naming = .new
+                    }
+                    if context.userLocation != nil {
+                        Toggle(isOn: $byDistance) { Label("Nearest First", systemImage: "location") }
+                    }
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) { EditButton() }
+        }
+        .alert(naming.map { if case .rename = $0 { "Rename Folder" } else { "New Folder" } } ?? "",
+               isPresented: Binding { naming != nil } set: { if !$0 { naming = nil } }) {
+            TextField("Name", text: $title)
+            Button("Cancel", role: .cancel) {}
+            Button(naming.map { if case .rename = $0 { "Rename" } else { "Create" } } ?? "") { commitNaming() }
+        }
+        .confirmationDialog(deleteTitle, isPresented: Binding { pendingDelete != nil } set: { if !$0 { pendingDelete = nil } },
+                            titleVisibility: .visible) {
+            Button("Delete Folder", role: .destructive) {
+                if let folder = pendingDelete { model.deleteFolder(folder.id) }
+            }
+        } message: {
+            Text("It will also be removed from GitHub. You can recover it from the repository’s history.")
+        }
+        .sheet(item: $moving) { moving in
+            switch moving {
+            case .folder(let folder):
+                FolderPicker(model: model, title: "Move “\(folder.title)”", excluding: model.document?.subtree(of: folder.id) ?? [],
+                             allowsTopLevel: true, current: folder.parentID) { parent in
+                    model.moveFolder(folder.id, to: parent)
+                }
+            case .place(let place):
+                FolderPicker(model: model, title: "Move “\(place.name)”", excluding: [], allowsTopLevel: false,
+                             current: place.folderID) { parent in
+                    guard let parent else { return }
+                    var moved = place
+                    moved.folderID = parent
+                    model.updatePlace(moved)
+                }
+            }
+        }
+    }
+
+    // MARK: - List
+
+    @ViewBuilder
+    private func list(_ document: MapDocument) -> some View {
+        if !query.isEmpty {
+            let matches = sorted(document.places.filter(matches))
+            List(matches) { place in
+                placeRow(place, document: document, showsFolder: true)
+            }
+            .overlay {
+                if matches.isEmpty { ContentUnavailableView.search(text: query) }
+            }
+        } else {
+            let folders = document.children(of: folderID)
+            let places = folderID.map { sorted(document.places(in: $0)) } ?? []
             List {
-                if let document = model.document {
-                    ForEach(document.folders) { folder in
-                        let places = sorted(document.places(in: folder.id).filter(matches))
-                        if !places.isEmpty {
-                            Section {
-                                ForEach(places) { place in row(place, document: document) }
-                            } header: {
-                                HStack(spacing: 6) {
-                                    Circle().fill(MapPalette.color(for: folder.id, in: document)).frame(width: 8, height: 8)
-                                    Text(folder.title)
-                                    Text("\(places.count)")
-                                }
-                            }
-                        }
+                if !folders.isEmpty {
+                    Section(folderID == nil ? "" : "Folders") {
+                        ForEach(folders) { folder in folderRow(folder, document: document) }
+                            .onMove { model.moveFolders(in: folderID, from: $0, to: $1) }
+                    }
+                }
+                if !places.isEmpty {
+                    Section("Places") {
+                        ForEach(places) { place in placeRow(place, document: document, showsFolder: false) }
                     }
                 }
             }
             .overlay {
-                if !query.isEmpty, model.document?.places.contains(where: matches) != true {
-                    ContentUnavailableView.search(text: query)
-                }
-            }
-            .searchable(text: $query, prompt: "Search saved places")
-            .navigationTitle("Saved Places")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-                if userLocation != nil {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Toggle(isOn: $byDistance) { Label("Nearest First", systemImage: "location") }
+                if folders.isEmpty, places.isEmpty {
+                    ContentUnavailableView {
+                        Label(folderID == nil ? "No Favorites" : "Empty Folder", systemImage: "star")
+                    } description: {
+                        Text("Save places from the map, or add a folder to organize them.")
+                    } actions: {
+                        Button("New Folder") {
+                            title = ""
+                            naming = .new
+                        }
                     }
                 }
             }
         }
     }
 
-    private func row(_ place: MapPlace, document: MapDocument) -> some View {
-        Button { select(place) } label: {
+    private func folderRow(_ folder: MapFolder, document: MapDocument) -> some View {
+        let hidden = context.hiddenFolders.wrappedValue.contains(folder.id)
+        return NavigationLink(value: FavoritesRoute(folderID: folder.id)) {
             HStack {
+                Image(systemName: "folder.fill").foregroundStyle(MapPalette.color(for: folder.id, in: document))
+                Text(folder.title)
+                Spacer()
+                if hidden {
+                    Image(systemName: "eye.slash").foregroundStyle(.secondary).font(.caption)
+                }
+                Text("\(document.placeCount(under: folder.id))").foregroundStyle(.secondary)
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = folder }
+            Button("Rename", systemImage: "pencil") {
+                title = folder.title
+                naming = .rename(folder)
+            }
+            .tint(.orange)
+        }
+        .swipeActions(edge: .leading) {
+            Button(hidden ? "Show" : "Hide", systemImage: hidden ? "eye" : "eye.slash") { toggleHidden(folder.id) }
+                .tint(.gray)
+        }
+        .contextMenu {
+            Button("Rename", systemImage: "pencil") {
+                title = folder.title
+                naming = .rename(folder)
+            }
+            Button("Move to…", systemImage: "folder") { moving = .folder(folder) }
+            Button(hidden ? "Show on Map" : "Hide on Map", systemImage: hidden ? "eye" : "eye.slash") { toggleHidden(folder.id) }
+            Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = folder }
+        }
+    }
+
+    private func placeRow(_ place: MapPlace, document: MapDocument, showsFolder: Bool) -> some View {
+        Button { context.select(place) } label: {
+            HStack {
+                Image(systemName: "star.fill").foregroundStyle(MapPalette.color(for: place.folderID, in: document))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(place.name).foregroundStyle(.primary)
                     if let address = place.address {
                         Text(address).font(.caption).foregroundStyle(.secondary)
                     }
-                    if let memo = place.memo {
+                    if showsFolder {
+                        Text(document.pathTitle(of: place.folderID)).font(.caption).foregroundStyle(.secondary)
+                    } else if let memo = place.memo {
                         Text(memo).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
@@ -193,135 +367,113 @@ struct PlaceList: View {
         }
         .swipeActions(edge: .trailing) {
             Button("Delete", systemImage: "trash", role: .destructive) { model.deletePlace(place.id) }
-            Button("Edit", systemImage: "pencil") {
-                dismiss()
-                edit(place)
-            }
-            .tint(.orange)
+            Button("Edit", systemImage: "pencil") { editPlace(place) }
+                .tint(.orange)
         }
         .contextMenu {
-            Menu("Move to", systemImage: "folder") {
-                ForEach(document.folders.filter { $0.id != place.folderID }) { folder in
-                    Button(folder.title) {
-                        var moved = place
-                        moved.folderID = folder.id
-                        model.updatePlace(moved)
-                    }
-                }
-            }
-            Button("Edit", systemImage: "pencil") {
-                dismiss()
-                edit(place)
-            }
+            Button("Edit", systemImage: "pencil") { editPlace(place) }
+            Button("Move to…", systemImage: "folder") { moving = .place(place) }
             Button("Delete", systemImage: "trash", role: .destructive) { model.deletePlace(place.id) }
         }
     }
 
+    // MARK: - Actions
+
+    private func editPlace(_ place: MapPlace) {
+        // The editor opens from the map once this sheet is gone.
+        context.select(place)
+        context.edit(place)
+    }
+
+    private func toggleHidden(_ id: Int) {
+        if context.hiddenFolders.wrappedValue.contains(id) {
+            context.hiddenFolders.wrappedValue.remove(id)
+        } else {
+            context.hiddenFolders.wrappedValue.insert(id)
+        }
+    }
+
+    private func commitNaming() {
+        let title = title.trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty, let naming else { return }
+        switch naming {
+        case .new: model.addFolder(title: title, in: folderID)
+        case .rename(let folder): model.renameFolder(folder.id, to: title)
+        }
+    }
+
+    private var deleteTitle: String {
+        guard let folder = pendingDelete, let document = model.document else { return "" }
+        let places = document.placeCount(under: folder.id)
+        let subfolders = document.subtree(of: folder.id).count - 1
+        var parts: [String] = []
+        if subfolders > 0 { parts.append("\(subfolders) subfolder\(subfolders == 1 ? "" : "s")") }
+        if places > 0 { parts.append("\(places) place\(places == 1 ? "" : "s")") }
+        return parts.isEmpty ? "Delete “\(folder.title)”?" : "Delete “\(folder.title)” and its \(parts.joined(separator: " and "))?"
+    }
+
     private func matches(_ place: MapPlace) -> Bool {
-        query.isEmpty || place.name.localizedStandardContains(query)
+        place.name.localizedStandardContains(query)
             || (place.address?.localizedStandardContains(query) ?? false)
             || (place.memo?.localizedStandardContains(query) ?? false)
     }
 
     private func sorted(_ places: [MapPlace]) -> [MapPlace] {
-        guard byDistance, userLocation != nil else { return places }
+        guard byDistance, context.userLocation != nil else { return places }
         return places.sorted { (distance(to: $0) ?? 0) < (distance(to: $1) ?? 0) }
     }
 
     private func distance(to place: MapPlace) -> CLLocationDistance? {
-        userLocation?.distance(from: CLLocation(latitude: place.lat, longitude: place.lon))
+        context.userLocation?.distance(from: CLLocation(latitude: place.lat, longitude: place.lon))
     }
 }
 
-/// Add, rename, reorder, hide and delete groups.
-struct FolderManager: View {
+/// Chooses a destination folder, shown as an indented outline.
+private struct FolderPicker: View {
     let model: MapDocumentModel
-    @Binding var hiddenFolders: Set<Int>
+    let title: String
+    let excluding: Set<Int>
+    let allowsTopLevel: Bool
+    let current: Int?
+    let pick: (Int?) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var renaming: MapFolder?
-    @State private var adding = false
-    @State private var title = ""
-    @State private var pendingDelete: MapFolder?
 
     var body: some View {
         NavigationStack {
             List {
-                if let document = model.document {
-                    ForEach(document.folders) { folder in
-                        HStack {
-                            Circle().fill(MapPalette.color(for: folder.id, in: document)).frame(width: 10, height: 10)
-                            Text(folder.title)
-                            Spacer()
-                            Text("\(document.places(in: folder.id).count)").foregroundStyle(.secondary)
-                            Button {
-                                if hiddenFolders.contains(folder.id) { hiddenFolders.remove(folder.id) } else { hiddenFolders.insert(folder.id) }
-                            } label: {
-                                Image(systemName: hiddenFolders.contains(folder.id) ? "eye.slash" : "eye")
-                            }
-                            .buttonStyle(.borderless)
-                            .accessibilityLabel(hiddenFolders.contains(folder.id) ? "Show on map" : "Hide on map")
-                        }
-                        .swipeActions(edge: .trailing) {
-                            Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = folder }
-                            Button("Rename", systemImage: "pencil") {
-                                title = folder.title
-                                renaming = folder
-                            }
-                            .tint(.orange)
-                        }
-                        .contextMenu {
-                            Button("Rename", systemImage: "pencil") {
-                                title = folder.title
-                                renaming = folder
-                            }
-                            Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = folder }
-                        }
-                    }
-                    .onMove { model.moveFolders(from: $0, to: $1) }
+                if allowsTopLevel {
+                    row("Favorites", systemImage: "star", depth: 0, id: nil)
+                }
+                ForEach(model.document?.outline(excluding: excluding) ?? [], id: \.folder.id) { entry in
+                    row(entry.folder.title, systemImage: "folder", depth: entry.depth + (allowsTopLevel ? 1 : 0), id: entry.folder.id)
                 }
             }
-            .navigationTitle("Groups")
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Cancel") { dismiss() }
                 }
-                ToolbarItem(placement: .topBarTrailing) { EditButton() }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("New Group", systemImage: "plus") {
-                        title = ""
-                        adding = true
-                    }
-                }
-            }
-            .alert("New Group", isPresented: $adding) {
-                TextField("Name", text: $title)
-                Button("Cancel", role: .cancel) {}
-                Button("Create") {
-                    let title = title.trimmingCharacters(in: .whitespaces)
-                    if !title.isEmpty { model.addFolder(title: title) }
-                }
-            }
-            .alert("Rename Group", isPresented: Binding { renaming != nil } set: { if !$0 { renaming = nil } }) {
-                TextField("Name", text: $title)
-                Button("Cancel", role: .cancel) {}
-                Button("Rename") {
-                    let title = title.trimmingCharacters(in: .whitespaces)
-                    if let folder = renaming, !title.isEmpty { model.renameFolder(folder.id, to: title) }
-                }
-            }
-            .confirmationDialog(
-                pendingDelete.map { "Delete “\($0.title)” and its \(model.document?.places(in: $0.id).count ?? 0) places?" } ?? "",
-                isPresented: Binding { pendingDelete != nil } set: { if !$0 { pendingDelete = nil } },
-                titleVisibility: .visible
-            ) {
-                Button("Delete Group", role: .destructive) {
-                    if let folder = pendingDelete { model.deleteFolder(folder.id) }
-                }
-            } message: {
-                Text("It will also be removed from GitHub. You can recover it from the repository’s history.")
             }
         }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func row(_ name: String, systemImage: String, depth: Int, id: Int?) -> some View {
+        Button {
+            pick(id)
+            dismiss()
+        } label: {
+            HStack {
+                Label(name, systemImage: systemImage)
+                    .padding(.leading, CGFloat(depth) * 18)
+                Spacer()
+                if id == current {
+                    Image(systemName: "checkmark").foregroundStyle(.tint)
+                }
+            }
+        }
+        .disabled(id == current)
     }
 }

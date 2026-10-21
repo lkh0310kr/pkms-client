@@ -18,8 +18,7 @@ struct MapDocumentView: View {
     @State private var route: RouteState?
     @State private var travelMode: TravelMode = .driving
     @State private var draft: PlaceDraft?
-    @State private var showsList = false
-    @State private var showsFolders = false
+    @State private var showsFavorites = false
     @State private var pendingDelete: MapPlace?
 
     var body: some View {
@@ -57,11 +56,10 @@ struct MapDocumentView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { SyncStatusIcon() }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu("More", systemImage: "ellipsis.circle") {
-                        Button("Saved Places", systemImage: "list.bullet") { showsList = true }
-                        Button("Manage Groups", systemImage: "folder") { showsFolders = true }
-                        Button("Add Place Here", systemImage: "mappin.and.ellipse") { dropPinAtCenter() }
-                    }
+                    Button("Add Place Here", systemImage: "mappin.and.ellipse") { dropPinAtCenter() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Favorites", systemImage: "star") { showsFavorites = true }
                 }
             }
             .sheet(item: $draft) { draft in
@@ -69,16 +67,17 @@ struct MapDocumentView: View {
                     if let saved { focus(on: saved) }
                 }
             }
-            .sheet(isPresented: $showsList) {
-                PlaceList(model: model, userLocation: location.location) { place in
-                    showsList = false
+            .sheet(isPresented: $showsFavorites) {
+                FavoritesView(model: model, userLocation: location.location, hiddenFolders: $hiddenFolders) { place in
+                    showsFavorites = false
                     focus(on: place)
                 } edit: { place in
-                    draft = PlaceDraft(place)
+                    // Present after the Favorites sheet has finished closing.
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(600))
+                        draft = PlaceDraft(place)
+                    }
                 }
-            }
-            .sheet(isPresented: $showsFolders) {
-                FolderManager(model: model, hiddenFolders: $hiddenFolders)
             }
             .confirmationDialog(pendingDelete.map { "Delete “\($0.name)”?" } ?? "", isPresented: Binding {
                 pendingDelete != nil
@@ -102,7 +101,7 @@ struct MapDocumentView: View {
     }
 
     private func mapView(_ model: MapDocumentModel, _ document: MapDocument) -> some View {
-        let visible = document.places.filter { !hiddenFolders.contains($0.folderID) }
+        let visible = document.places.filter { !isHidden($0.folderID, in: document) }
         return MapReader { proxy in
             // No rotate gesture, like Kakao Map: pinching only zooms, so north stays up.
             Map(position: $camera, interactionModes: [.pan, .zoom, .pitch], selection: $selection) {
@@ -221,7 +220,7 @@ struct MapDocumentView: View {
     private func folderChips(_ document: MapDocument) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(document.folders) { folder in
+                ForEach(document.children(of: nil)) { folder in
                     let isOn = !hiddenFolders.contains(folder.id)
                     Button {
                         if isOn { hiddenFolders.insert(folder.id) } else { hiddenFolders.remove(folder.id) }
@@ -229,7 +228,7 @@ struct MapDocumentView: View {
                         HStack(spacing: 6) {
                             Circle().fill(color(for: folder.id, in: document)).frame(width: 9, height: 9)
                             Text(folder.title)
-                            Text("\(document.places(in: folder.id).count)").foregroundStyle(.secondary)
+                            Text("\(document.placeCount(under: folder.id))").foregroundStyle(.secondary)
                         }
                         .font(.subheadline)
                         .padding(.horizontal, 12)
@@ -254,7 +253,7 @@ struct MapDocumentView: View {
             PlaceCard(
                 target: target,
                 saved: savedPlace(for: selection, in: model, document: document),
-                folderTitle: savedPlace(for: selection, in: model, document: document).flatMap { document.folder($0.folderID)?.title },
+                folderTitle: savedPlace(for: selection, in: model, document: document).map { document.pathTitle(of: $0.folderID) },
                 distance: location.location.map { $0.distance(from: CLLocation(latitude: target.coordinate.latitude, longitude: target.coordinate.longitude)) },
                 route: route?.target == target ? route : nil,
                 travelMode: $travelMode,
@@ -348,7 +347,7 @@ struct MapDocumentView: View {
     private func focus(on place: MapPlace) {
         query = ""
         isSearchPresented = false
-        hiddenFolders.remove(place.folderID)
+        hiddenFolders.subtract(document(model)?.ancestry(of: place.folderID).map(\.id) ?? [])
         withAnimation {
             camera = .region(MKCoordinateRegion(center: place.coordinate, latitudinalMeters: 700, longitudinalMeters: 700))
         }
@@ -390,6 +389,13 @@ struct MapDocumentView: View {
     private func color(for folderID: Int, in document: MapDocument) -> Color {
         MapPalette.color(for: folderID, in: document)
     }
+
+    /// Hiding a folder also hides everything nested in it.
+    private func isHidden(_ folderID: Int, in document: MapDocument) -> Bool {
+        document.ancestry(of: folderID).contains { hiddenFolders.contains($0.id) }
+    }
+
+    private func document(_ model: MapDocumentModel?) -> MapDocument? { model?.document }
 }
 
 enum MapItemID: Hashable {
@@ -409,8 +415,10 @@ struct RouteState {
 enum MapPalette {
     static let colors: [Color] = [.red, .blue, .green, .orange, .purple, .teal, .pink, .indigo, .brown, .mint]
 
+    /// Nested folders share their top-level folder's color.
     static func color(for folderID: Int, in document: MapDocument) -> Color {
-        let index = document.folders.firstIndex { $0.id == folderID } ?? 0
+        let top = document.ancestry(of: folderID).first?.id ?? folderID
+        let index = document.children(of: nil).firstIndex { $0.id == top } ?? 0
         return colors[index % colors.count]
     }
 }

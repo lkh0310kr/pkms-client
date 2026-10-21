@@ -60,4 +60,41 @@ struct MapDocumentTests {
         #expect(!repo.exists(path.appending("\(folder.id).json")))
         #expect(try await MapDocument.load(path, from: repo).places.isEmpty)
     }
+
+    @MainActor @Test func foldersNestAndMoveWithoutCycles() async throws {
+        let repo = try makeVault()
+        let store = VaultStore(repository: repo, defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let path = VaultPath("places.map")
+        let model = MapDocumentModel(path: path, store: store)
+        await model.load()
+
+        let cafes = try #require(model.addFolder(title: "Cafés", in: 7))
+        let roastery = try #require(model.addFolder(title: "Roasteries", in: cafes.id))
+        model.addPlace(name: "Beans", address: nil, memo: nil, coordinate: .init(latitude: 37.5, longitude: 127), folderID: roastery.id)
+
+        var document = try await MapDocument.load(path, from: repo)
+        #expect(document.children(of: nil).map(\.title) == ["Seoul", "Empty"])
+        #expect(document.children(of: 7).map(\.title) == ["Cafés"])
+        #expect(document.pathTitle(of: roastery.id) == "Seoul / Cafés / Roasteries")
+        #expect(document.placeCount(under: 7) == 2)
+        #expect(document.outline().map(\.depth) == [0, 1, 2, 0])
+
+        // A folder can't move into its own subfolder.
+        #expect(!model.canMoveFolder(cafes.id, to: roastery.id))
+        model.moveFolder(cafes.id, to: roastery.id)
+        #expect(model.document?.folder(cafes.id)?.parentID == 7)
+
+        model.moveFolder(roastery.id, to: nil)
+        model.moveFolders(in: nil, from: [2], to: 0)
+        document = try await MapDocument.load(path, from: repo)
+        #expect(document.children(of: nil).map(\.title) == ["Roasteries", "Seoul", "Empty"])
+
+        // Deleting a folder takes its subfolders and their places with it.
+        model.moveFolder(roastery.id, to: cafes.id)
+        model.deleteFolder(7)
+        document = try await MapDocument.load(path, from: repo)
+        #expect(document.folders.map(\.title) == ["Empty"])
+        #expect(document.places.isEmpty)
+        #expect(!repo.exists(path.appending("\(roastery.id).json")))
+    }
 }

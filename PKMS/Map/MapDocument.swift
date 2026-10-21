@@ -3,8 +3,8 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// A `*.map` folder in the vault: `folders.json` lists the groups, and `<folder id>.json` holds each group's places.
-/// Plain JSON files, so the folder syncs through Git like any note.
+/// A `*.map` folder in the vault: `folders.json` lists the favorite folders (nested through `parent`),
+/// and `<folder id>.json` holds each folder's own places. Plain JSON files, so it syncs through Git like any note.
 struct MapDocument: Sendable {
     var folders: [MapFolder]
     var places: [MapPlace]
@@ -15,6 +15,65 @@ struct MapDocument: Sendable {
 
     func folder(_ id: Int) -> MapFolder? {
         folders.first { $0.id == id }
+    }
+
+    // MARK: - Hierarchy
+
+    /// Folders directly inside `parent`, or the top-level folders for `nil`, in their saved order.
+    func children(of parent: Int?) -> [MapFolder] {
+        folders.filter { $0.parentID == parent }
+    }
+
+    /// `id` and every folder nested under it.
+    func subtree(of id: Int) -> Set<Int> {
+        var result: Set<Int> = [id]
+        var queue = [id]
+        while let next = queue.popLast() {
+            for child in children(of: next) where result.insert(child.id).inserted {
+                queue.append(child.id)
+            }
+        }
+        return result
+    }
+
+    /// Folders from the top level down to `id`.
+    func ancestry(of id: Int) -> [MapFolder] {
+        var chain: [MapFolder] = []
+        var current = folder(id)
+        while let folder = current, !chain.contains(where: { $0.id == folder.id }) {
+            chain.insert(folder, at: 0)
+            current = folder.parentID.flatMap(self.folder)
+        }
+        return chain
+    }
+
+    /// "서울 / 카페" for a nested folder.
+    func pathTitle(of id: Int) -> String {
+        ancestry(of: id).map(\.title).joined(separator: " / ")
+    }
+
+    /// Places in the folder and everything nested under it.
+    func placeCount(under id: Int) -> Int {
+        let ids = subtree(of: id)
+        return places.filter { ids.contains($0.folderID) }.count
+    }
+
+    /// Every folder in display order with its nesting depth, for pickers.
+    func outline(excluding excluded: Set<Int> = []) -> [(folder: MapFolder, depth: Int)] {
+        var result: [(MapFolder, Int)] = []
+        func visit(_ parent: Int?, _ depth: Int) {
+            for child in children(of: parent) where !excluded.contains(child.id) {
+                result.append((child, depth))
+                visit(child.id, depth + 1)
+            }
+        }
+        visit(nil, 0)
+        // Folders whose parent is missing (e.g. deleted on another device) still show, at the top level.
+        let shown = Set(result.map(\.0.id))
+        for folder in folders where !shown.contains(folder.id) && !excluded.contains(folder.id) {
+            result.append((folder, 0))
+        }
+        return result
     }
 
     static func load(_ path: VaultPath, from repository: any VaultRepository) async throws -> MapDocument {
@@ -60,7 +119,15 @@ struct MapFolder: Codable, Identifiable, Hashable, Sendable {
     var title: String
     var memo: String?
     var icon: String
+    /// Places directly in this folder (not counting subfolders).
     var count: Int
+    /// Containing folder; `nil` for a top-level folder.
+    var parentID: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, memo, icon, count
+        case parentID = "parent"
+    }
 }
 
 struct MapPlace: Codable, Identifiable, Hashable, Sendable {
@@ -155,12 +222,29 @@ final class MapDocumentModel {
     // MARK: - Folders
 
     @discardableResult
-    func addFolder(title: String) -> MapFolder? {
+    func addFolder(title: String, in parent: Int? = nil) -> MapFolder? {
         guard var document else { return nil }
-        let folder = MapFolder(id: Self.newID(), title: title, icon: "01", count: 0)
+        let folder = MapFolder(id: Self.newID(), title: title, icon: "01", count: 0, parentID: parent)
         document.folders.append(folder)
         commit(document, folders: [folder.id])
         return folder
+    }
+
+    /// Whether `id` can move into `parent`: never into itself or one of its own subfolders.
+    func canMoveFolder(_ id: Int, to parent: Int?) -> Bool {
+        guard let document else { return false }
+        guard let parent else { return true }
+        return !document.subtree(of: id).contains(parent)
+    }
+
+    func moveFolder(_ id: Int, to parent: Int?) {
+        guard canMoveFolder(id, to: parent), var document,
+              let i = document.folders.firstIndex(where: { $0.id == id }) else { return }
+        // Moved folders go to the end of their new parent's list.
+        var folder = document.folders.remove(at: i)
+        folder.parentID = parent
+        document.folders.append(folder)
+        commit(document, folders: [])
     }
 
     func renameFolder(_ id: Int, to title: String) {
@@ -169,24 +253,31 @@ final class MapDocumentModel {
         commit(document, folders: [])
     }
 
-    /// Removes a folder and every place in it.
+    /// Removes a folder with its subfolders and every place in them.
     func deleteFolder(_ id: Int) {
         guard var document else { return }
-        document.folders.removeAll { $0.id == id }
-        document.places.removeAll { $0.folderID == id }
+        let removed = document.subtree(of: id)
+        document.folders.removeAll { removed.contains($0.id) }
+        document.places.removeAll { removed.contains($0.folderID) }
         self.document = document
         do {
             try store.save(try document.indexJSON(), to: path.appending("folders.json"))
-            let file = path.appending(MapDocument.fileName(for: id))
-            if store.repository.exists(file) { try store.repository.delete(file) }
+            for id in removed {
+                let file = path.appending(MapDocument.fileName(for: id))
+                if store.repository.exists(file) { try store.repository.delete(file) }
+            }
         } catch {
             saveError = error.localizedDescription
         }
     }
 
-    func moveFolders(from source: IndexSet, to destination: Int) {
+    /// Reorders the folders inside `parent`, leaving every other folder where it is.
+    func moveFolders(in parent: Int?, from source: IndexSet, to destination: Int) {
         guard var document else { return }
-        document.folders.move(fromOffsets: source, toOffset: destination)
+        var siblings = document.children(of: parent)
+        siblings.move(fromOffsets: source, toOffset: destination)
+        var next = siblings.makeIterator()
+        document.folders = document.folders.map { $0.parentID == parent ? next.next()! : $0 }
         commit(document, folders: [])
     }
 
