@@ -1,65 +1,227 @@
 import MapKit
 import SwiftUI
 
-/// Shows a `*.map` folder as places on a map, with one toggle per group.
+/// Shows a `*.map` folder as places on a map: your location, search, routes and editing the saved places.
 struct MapDocumentView: View {
     let path: VaultPath
 
     @Environment(VaultStore.self) private var store
-    @State private var document: MapDocument?
-    @State private var loadError: String?
+    @State private var model: MapDocumentModel?
+    @State private var location = LocationAccess()
+    @State private var search = PlaceSearch()
+    @State private var query = ""
+    @State private var isSearchPresented = false
     @State private var hiddenFolders: Set<Int> = []
-    @State private var selection: Int?
+    @State private var selection: MapItemID?
     @State private var camera: MapCameraPosition = .automatic
-
-    private static let palette: [Color] = [.red, .blue, .green, .orange, .purple, .teal, .pink, .indigo]
+    @State private var droppedPin: CLLocationCoordinate2D?
+    @State private var route: RouteState?
+    @State private var travelMode: TravelMode = .driving
+    @State private var draft: PlaceDraft?
+    @State private var showsList = false
+    @State private var showsFolders = false
+    @State private var pendingDelete: MapPlace?
 
     var body: some View {
         Group {
-            if let document {
-                map(document)
-            } else if let loadError {
+            if let model, let document = model.document {
+                content(model, document)
+            } else if let error = model?.loadError {
                 ContentUnavailableView("Couldn’t Open Map", systemImage: "exclamationmark.triangle",
-                                       description: Text(loadError))
+                                       description: Text(error))
             } else {
                 ProgressView()
             }
         }
         .navigationTitle(path.baseName)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) { SyncStatusIcon() }
+        .task(id: store.revision) {
+            if model == nil { model = MapDocumentModel(path: path, store: store) }
+            await model?.load()
         }
-        .task(id: store.revision) { await load() }
+        .onAppear { location.start() }
+        .onDisappear { location.stop() }
     }
 
-    private func map(_ document: MapDocument) -> some View {
+    // MARK: - Layout
+
+    private func content(_ model: MapDocumentModel, _ document: MapDocument) -> some View {
+        mapView(model, document)
+            .searchable(text: $query, isPresented: $isSearchPresented, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search places")
+            .searchSuggestions { suggestions(document) }
+            .onSubmit(of: .search) { Task { await runSearch { await search.run(query) } } }
+            .onChange(of: query) { _, new in
+                search.update(query: new)
+                if new.isEmpty { clearSearch() }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { SyncStatusIcon() }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu("More", systemImage: "ellipsis.circle") {
+                        Button("Saved Places", systemImage: "list.bullet") { showsList = true }
+                        Button("Manage Groups", systemImage: "folder") { showsFolders = true }
+                        Button("Add Place Here", systemImage: "mappin.and.ellipse") { dropPinAtCenter() }
+                    }
+                }
+            }
+            .sheet(item: $draft) { draft in
+                PlaceEditor(draft: draft, model: model) { saved in
+                    if let saved { focus(on: saved) }
+                }
+            }
+            .sheet(isPresented: $showsList) {
+                PlaceList(model: model, userLocation: location.location) { place in
+                    showsList = false
+                    focus(on: place)
+                } edit: { place in
+                    draft = PlaceDraft(place)
+                }
+            }
+            .sheet(isPresented: $showsFolders) {
+                FolderManager(model: model, hiddenFolders: $hiddenFolders)
+            }
+            .confirmationDialog(pendingDelete.map { "Delete “\($0.name)”?" } ?? "", isPresented: Binding {
+                pendingDelete != nil
+            } set: { if !$0 { pendingDelete = nil } }, titleVisibility: .visible) {
+                Button("Delete", role: .destructive) {
+                    if let place = pendingDelete {
+                        model.deletePlace(place.id)
+                        if selection == .saved(place.id) { selection = nil }
+                    }
+                }
+            }
+            .alert("Couldn’t Save", isPresented: Binding { model.saveError != nil } set: { if !$0 { model.saveError = nil } }) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(model.saveError ?? "")
+            }
+            .onChange(of: selection) { _, new in
+                if route?.target != target(for: new, in: document) { route = nil }
+                if new != .pin { droppedPin = nil }
+            }
+    }
+
+    private func mapView(_ model: MapDocumentModel, _ document: MapDocument) -> some View {
         let visible = document.places.filter { !hiddenFolders.contains($0.folderID) }
-        return Map(position: $camera, selection: $selection) {
-            UserAnnotation()
-            ForEach(visible) { place in
-                Marker(place.name, coordinate: place.coordinate)
-                    .tint(color(for: place.folderID, in: document))
-                    .tag(place.id)
+        return MapReader { proxy in
+            Map(position: $camera, selection: $selection) {
+                UserAnnotation()
+                ForEach(visible) { place in
+                    Marker(place.name, systemImage: "star.fill", coordinate: place.coordinate)
+                        .tint(color(for: place.folderID, in: document))
+                        .tag(MapItemID.saved(place.id))
+                }
+                ForEach(Array(search.results.enumerated()), id: \.offset) { i, item in
+                    Marker(item: item).tag(MapItemID.result(i))
+                }
+                if let droppedPin {
+                    Marker("Dropped Pin", systemImage: "mappin", coordinate: droppedPin)
+                        .tint(.gray)
+                        .tag(MapItemID.pin)
+                }
+                if let polyline = route?.route?.polyline {
+                    MapPolyline(polyline).stroke(.blue, lineWidth: 6)
+                }
+            }
+            .mapControls {
+                MapUserLocationButton()
+                MapCompass()
+                MapPitchToggle()
+                MapScaleView()
+            }
+            .onMapCameraChange(frequency: .onEnd) { context in
+                search.region = context.region
+                visibleRegion = context.region
+            }
+            // Long-press anywhere to drop a pin, like Apple Maps.
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.45)
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+                    .onEnded { value in
+                        guard case .second(true, let drag?) = value,
+                              let coordinate = proxy.convert(drag.location, from: .local) else { return }
+                        dropPin(at: coordinate)
+                    }
+            )
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if query.isEmpty { folderChips(document) }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) { bottomPanel(model, document) }
+    }
+
+    @State private var visibleRegion: MKCoordinateRegion?
+
+    // MARK: - Search
+
+    @ViewBuilder
+    private func suggestions(_ document: MapDocument) -> some View {
+        let saved = query.isEmpty ? [] : document.places.filter {
+            $0.name.localizedStandardContains(query) || ($0.address?.localizedStandardContains(query) ?? false)
+                || ($0.memo?.localizedStandardContains(query) ?? false)
+        }
+        if !saved.isEmpty {
+            Section("Saved") {
+                ForEach(saved.prefix(5)) { place in
+                    Button { focus(on: place) } label: {
+                        Label {
+                            VStack(alignment: .leading) {
+                                Text(place.name).foregroundStyle(.primary)
+                                if let address = place.address {
+                                    Text(address).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        } icon: {
+                            Image(systemName: "star.fill").foregroundStyle(color(for: place.folderID, in: document))
+                        }
+                    }
+                }
             }
         }
-        .mapControls {
-            MapUserLocationButton()
-            MapCompass()
-            MapScaleView()
-        }
-        .safeAreaInset(edge: .top, spacing: 0) { folderChips(document) }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if let place = document.places.first(where: { $0.id == selection }) {
-                detail(place, in: document)
+        if !search.suggestions.isEmpty {
+            Section("Places") {
+                ForEach(search.suggestions, id: \.self) { completion in
+                    Button {
+                        query = completion.title
+                        Task { await runSearch { await search.run(completion) } }
+                    } label: {
+                        Label {
+                            VStack(alignment: .leading) {
+                                Text(completion.title).foregroundStyle(.primary)
+                                if !completion.subtitle.isEmpty {
+                                    Text(completion.subtitle).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        } icon: {
+                            Image(systemName: "magnifyingglass")
+                        }
+                    }
+                }
             }
         }
     }
+
+    private func runSearch(_ work: () async -> Void) async {
+        selection = nil
+        await work()
+        isSearchPresented = false
+        if search.results.count == 1 {
+            selection = .result(0)
+        }
+        fit(search.results.map(\.placemark.coordinate))
+    }
+
+    private func clearSearch() {
+        search.clear()
+        if case .result = selection { selection = nil }
+    }
+
+    // MARK: - Folder chips
 
     private func folderChips(_ document: MapDocument) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(document.folders.filter { $0.count > 0 }) { folder in
+                ForEach(document.folders) { folder in
                     let isOn = !hiddenFolders.contains(folder.id)
                     Button {
                         if isOn { hiddenFolders.insert(folder.id) } else { hiddenFolders.remove(folder.id) }
@@ -67,7 +229,7 @@ struct MapDocumentView: View {
                         HStack(spacing: 6) {
                             Circle().fill(color(for: folder.id, in: document)).frame(width: 9, height: 9)
                             Text(folder.title)
-                            Text("\(folder.count)").foregroundStyle(.secondary)
+                            Text("\(document.places(in: folder.id).count)").foregroundStyle(.secondary)
                         }
                         .font(.subheadline)
                         .padding(.horizontal, 12)
@@ -84,51 +246,291 @@ struct MapDocumentView: View {
         }
     }
 
-    private func detail(_ place: MapPlace, in document: MapDocument) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(place.name).font(.headline)
-                Spacer()
-                Button("Close", systemImage: "xmark.circle.fill") { selection = nil }
-                    .labelStyle(.iconOnly)
-                    .foregroundStyle(.secondary)
+    // MARK: - Bottom panel
+
+    @ViewBuilder
+    private func bottomPanel(_ model: MapDocumentModel, _ document: MapDocument) -> some View {
+        if let target = target(for: selection, in: document) {
+            PlaceCard(
+                target: target,
+                saved: savedPlace(for: selection, in: model, document: document),
+                folderTitle: savedPlace(for: selection, in: model, document: document).flatMap { document.folder($0.folderID)?.title },
+                distance: location.location.map { $0.distance(from: CLLocation(latitude: target.coordinate.latitude, longitude: target.coordinate.longitude)) },
+                route: route?.target == target ? route : nil,
+                travelMode: $travelMode,
+                onClose: { selection = nil },
+                onDirections: { Task { await showRoute(to: target) } },
+                onClearRoute: { route = nil },
+                onNavigate: { app in app.open(to: target, from: nil, mode: travelMode) },
+                onSave: {
+                    if let place = savedPlace(for: selection, in: model, document: document) {
+                        draft = PlaceDraft(place)
+                    } else {
+                        draft = PlaceDraft(target: target, folderID: defaultFolder(in: document))
+                    }
+                },
+                onDelete: { pendingDelete = savedPlace(for: selection, in: model, document: document) }
+            )
+            .onChange(of: travelMode) { _, _ in
+                if route?.target == target { Task { await showRoute(to: target) } }
             }
-            if let address = place.address {
-                Text(address).font(.subheadline).foregroundStyle(.secondary)
-            }
-            if let memo = place.memo {
-                Text(memo).font(.subheadline)
-            }
-            HStack {
-                if let folder = document.folders.first(where: { $0.id == place.folderID }) {
-                    Label(folder.title, systemImage: "folder").font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Open in Maps", systemImage: "map") {
-                    let item = MKMapItem(placemark: MKPlacemark(coordinate: place.coordinate))
-                    item.name = place.name
-                    item.openInMaps()
-                }
+        } else if let error = search.error, !query.isEmpty, !search.isSearching {
+            Text(error)
                 .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(12)
+                .background(.regularMaterial, in: .capsule)
+                .padding(.bottom, 8)
+        } else if location.isDenied {
+            Button("Turn on Location in Settings", systemImage: "location.slash") {
+                if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
             }
+            .font(.subheadline)
+            .padding(12)
+            .background(.regularMaterial, in: .capsule)
+            .padding(.bottom, 8)
         }
-        .padding(14)
-        .background(.regularMaterial, in: .rect(cornerRadius: 14))
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
+    }
+
+    // MARK: - Routes
+
+    private func showRoute(to target: MapTarget) async {
+        route = RouteState(target: target, mode: travelMode, isLoading: true)
+        let request = MKDirections.Request()
+        request.source = .forCurrentLocation()
+        request.destination = MKMapItem(placemark: MKPlacemark(coordinate: target.coordinate))
+        request.transportType = travelMode.transportType
+        let mode = travelMode
+        do {
+            let response = try await MKDirections(request: request).calculate()
+            guard route?.target == target, travelMode == mode else { return }
+            let best = response.routes.min { $0.expectedTravelTime < $1.expectedTravelTime }
+            route = RouteState(target: target, mode: mode, route: best)
+            if let best { camera = .rect(best.polyline.boundingMapRect.insetBy(dx: -best.polyline.boundingMapRect.width * 0.25, dy: -best.polyline.boundingMapRect.height * 0.4)) }
+        } catch {
+            guard route?.target == target else { return }
+            let message = location.isDenied
+                ? "Location is off, so a route can’t start from here."
+                : "Apple Maps has no \(mode.title.lowercased()) route here. Open it in another app below."
+            route = RouteState(target: target, mode: mode, error: message)
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func target(for id: MapItemID?, in document: MapDocument) -> MapTarget? {
+        switch id {
+        case .saved(let placeID):
+            guard let place = document.places.first(where: { $0.id == placeID }) else { return nil }
+            return MapTarget(name: place.name, address: place.address, coordinate: place.coordinate)
+        case .result(let i):
+            guard search.results.indices.contains(i) else { return nil }
+            let item = search.results[i]
+            return MapTarget(name: item.name ?? "Place", address: item.shortAddress, coordinate: item.placemark.coordinate)
+        case .pin:
+            guard let droppedPin else { return nil }
+            return MapTarget(name: "Dropped Pin", address: nil, coordinate: droppedPin)
+        case nil:
+            return nil
+        }
+    }
+
+    /// The favorite behind the selection: the saved place itself, or one already saved at a search result's spot.
+    private func savedPlace(for id: MapItemID?, in model: MapDocumentModel, document: MapDocument) -> MapPlace? {
+        switch id {
+        case .saved(let placeID): document.places.first { $0.id == placeID }
+        case .result(let i) where search.results.indices.contains(i):
+            model.savedPlace(near: search.results[i].placemark.coordinate, named: search.results[i].name)
+        default: nil
+        }
+    }
+
+    private func focus(on place: MapPlace) {
+        query = ""
+        isSearchPresented = false
+        hiddenFolders.remove(place.folderID)
+        withAnimation {
+            camera = .region(MKCoordinateRegion(center: place.coordinate, latitudinalMeters: 700, longitudinalMeters: 700))
+        }
+        // Select once the search overlay or sheet is gone; otherwise the map treats the closing tap as
+        // a tap on empty map and clears the selection right away.
+        Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            selection = .saved(place.id)
+        }
+    }
+
+    private func dropPin(at coordinate: CLLocationCoordinate2D) {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        droppedPin = coordinate
+        selection = .pin
+    }
+
+    private func dropPinAtCenter() {
+        guard let center = visibleRegion?.center ?? location.location?.coordinate else { return }
+        dropPin(at: center)
+    }
+
+    private func fit(_ coordinates: [CLLocationCoordinate2D]) {
+        guard !coordinates.isEmpty else { return }
+        if coordinates.count == 1 {
+            withAnimation { camera = .region(MKCoordinateRegion(center: coordinates[0], latitudinalMeters: 900, longitudinalMeters: 900)) }
+            return
+        }
+        let rect = coordinates.map { MKMapRect(origin: MKMapPoint($0), size: MKMapSize(width: 1, height: 1)) }
+            .reduce(MKMapRect.null) { $0.union($1) }
+        withAnimation { camera = .rect(rect.insetBy(dx: -rect.width * 0.2 - 500, dy: -rect.height * 0.3 - 500)) }
+    }
+
+    private func defaultFolder(in document: MapDocument) -> Int {
+        document.folders.max { document.places(in: $0.id).count < document.places(in: $1.id).count }?.id
+            ?? document.folders.first?.id ?? 0
     }
 
     private func color(for folderID: Int, in document: MapDocument) -> Color {
+        MapPalette.color(for: folderID, in: document)
+    }
+}
+
+enum MapItemID: Hashable {
+    case saved(Int)
+    case result(Int)
+    case pin
+}
+
+struct RouteState {
+    var target: MapTarget
+    var mode: TravelMode
+    var isLoading = false
+    var route: MKRoute?
+    var error: String?
+}
+
+enum MapPalette {
+    static let colors: [Color] = [.red, .blue, .green, .orange, .purple, .teal, .pink, .indigo, .brown, .mint]
+
+    static func color(for folderID: Int, in document: MapDocument) -> Color {
         let index = document.folders.firstIndex { $0.id == folderID } ?? 0
-        return Self.palette[index % Self.palette.count]
+        return colors[index % colors.count]
+    }
+}
+
+/// Details and actions for whatever is selected on the map.
+private struct PlaceCard: View {
+    let target: MapTarget
+    let saved: MapPlace?
+    let folderTitle: String?
+    let distance: CLLocationDistance?
+    let route: RouteState?
+    @Binding var travelMode: TravelMode
+    let onClose: () -> Void
+    let onDirections: () -> Void
+    let onClearRoute: () -> Void
+    let onNavigate: (NavigationApp) -> Void
+    let onSave: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(saved?.name ?? target.name).font(.headline)
+                Spacer()
+                Button("Close", systemImage: "xmark.circle.fill", action: onClose)
+                    .labelStyle(.iconOnly)
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+            if let address = saved?.address ?? target.address {
+                Text(address).font(.subheadline).foregroundStyle(.secondary)
+            }
+            if let memo = saved?.memo {
+                Text(memo).font(.subheadline)
+            }
+            HStack(spacing: 12) {
+                if let folderTitle {
+                    Label(folderTitle, systemImage: "star.fill")
+                }
+                if let distance {
+                    Label(distance.distanceText, systemImage: "location")
+                }
+                if saved?.estimated == true {
+                    Label("Approximate", systemImage: "scope")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if let route {
+                routeSection(route)
+            } else {
+                actions
+            }
+        }
+        .padding(14)
+        .background(.regularMaterial, in: .rect(cornerRadius: 16))
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
 
-    private func load() async {
-        do {
-            document = try await MapDocument.load(path, from: store.repository)
-            loadError = nil
-        } catch {
-            if document == nil { loadError = error.localizedDescription }
+    private var actions: some View {
+        HStack(spacing: 8) {
+            Button(action: onDirections) {
+                Label("Directions", systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            Button(action: onSave) {
+                Label(saved == nil ? "Save" : "Edit", systemImage: saved == nil ? "star" : "pencil")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            if saved != nil {
+                Button("Delete", systemImage: "trash", role: .destructive, action: onDelete)
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.bordered)
+            }
+        }
+        .controlSize(.regular)
+    }
+
+    private func routeSection(_ route: RouteState) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Travel", selection: $travelMode) {
+                ForEach(TravelMode.allCases) { mode in
+                    Label(mode.title, systemImage: mode.symbol).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Group {
+                if route.isLoading {
+                    HStack { ProgressView(); Text("Finding a route…") }
+                } else if let best = route.route {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(best.expectedTravelTime.travelTimeText).font(.title3.weight(.semibold))
+                        Text(best.distance.distanceText).foregroundStyle(.secondary)
+                    }
+                } else if let error = route.error {
+                    Text(error).font(.subheadline).foregroundStyle(.secondary)
+                }
+            }
+            .frame(minHeight: 28)
+
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach(NavigationApp.allCases) { app in
+                        Button(app.title) { onNavigate(app) }
+                    }
+                } label: {
+                    Label("Navigate", systemImage: "location.north.line.fill")
+                        .frame(maxWidth: .infinity)
+                } primaryAction: {
+                    onNavigate(.kakao)
+                }
+                .buttonStyle(.borderedProminent)
+                Button("End Route", systemImage: "xmark", action: onClearRoute)
+                    .buttonStyle(.bordered)
+            }
         }
     }
 }
