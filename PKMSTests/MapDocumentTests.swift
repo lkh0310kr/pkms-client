@@ -61,6 +61,38 @@ struct MapDocumentTests {
         #expect(try await MapDocument.load(path, from: repo).places.isEmpty)
     }
 
+    @MainActor @Test func placeNotesAreOptionalAndGoWithThePlace() async throws {
+        let repo = try makeVault()
+        let store = VaultStore(repository: repo, defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let path = VaultPath("places.map")
+        let model = MapDocumentModel(path: path, store: store)
+        await model.load()
+
+        // Place 1 has no note; a blank file counts as none.
+        #expect(await model.note(for: 1) == nil)
+        try repo.writeText("  \n", to: path.appending(MapDocument.noteFileName(for: 1)))
+        #expect(await model.note(for: 1) == nil)
+
+        try repo.writeText("# Cafe\n- open late\n", to: path.appending(MapDocument.noteFileName(for: 1)))
+        #expect(await model.note(for: 1) == "# Cafe\n- open late\n")
+
+        // Saving the JSON through the app leaves the note alone; deleting the place removes it.
+        model.renameFolder(7, to: "서울")
+        #expect(repo.exists(path.appending("notes/1.md")))
+        model.deletePlace(1)
+        #expect(!repo.exists(path.appending("notes/1.md")))
+
+        // Deleting a folder removes its own note and its places' notes.
+        let other = try #require(model.addFolder(title: "Busan"))
+        let place = try #require(model.addPlace(name: "Beach", address: nil, memo: nil,
+                                                coordinate: .init(latitude: 35.15, longitude: 129.16), folderID: other.id))
+        try repo.writeText("folder", to: path.appending(MapDocument.noteFileName(for: other.id)))
+        try repo.writeText("place", to: path.appending(MapDocument.noteFileName(for: place.id)))
+        model.deleteFolder(other.id)
+        #expect(!repo.exists(path.appending(MapDocument.noteFileName(for: other.id))))
+        #expect(!repo.exists(path.appending(MapDocument.noteFileName(for: place.id))))
+    }
+
     @MainActor @Test func foldersNestAndMoveWithoutCycles() async throws {
         let repo = try makeVault()
         let store = VaultStore(repository: repo, defaults: UserDefaults(suiteName: UUID().uuidString)!)

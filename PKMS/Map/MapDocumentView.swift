@@ -22,6 +22,7 @@ struct MapDocumentView: View {
     @State private var showsFavorites = false
     @State private var showsFilter = false
     @State private var pendingDelete: MapPlace?
+    @State private var note: String?
 
     var body: some View {
         Group {
@@ -255,6 +256,7 @@ struct MapDocumentView: View {
                 saved: savedPlace(for: selection, in: model, document: document),
                 folderTitle: savedPlace(for: selection, in: model, document: document).map { document.pathTitle(of: $0.folderID) },
                 distance: location.location.map { $0.distance(from: CLLocation(latitude: target.coordinate.latitude, longitude: target.coordinate.longitude)) },
+                note: note,
                 route: route?.target == target ? route : nil,
                 travelMode: $travelMode,
                 onClose: { selection = nil },
@@ -272,6 +274,12 @@ struct MapDocumentView: View {
             )
             .onChange(of: travelMode) { _, _ in
                 if route?.target == target { Task { await showRoute(to: target) } }
+            }
+            .task(id: selection) {
+                note = nil
+                if let place = savedPlace(for: selection, in: model, document: document) {
+                    note = await model.note(for: place.id)
+                }
             }
         } else if let error = search.error, !query.isEmpty, !search.isSearching {
             Text(error)
@@ -468,8 +476,11 @@ private struct PlaceCard: View {
     let saved: MapPlace?
     let folderTitle: String?
     let distance: CLLocationDistance?
+    /// Optional research note (`notes/<id>.md`) for a saved place.
+    let note: String?
     let route: RouteState?
     @Binding var travelMode: TravelMode
+    @State private var showsNote = false
     let onClose: () -> Void
     let onDirections: () -> Void
     let onClearRoute: () -> Void
@@ -492,6 +503,10 @@ private struct PlaceCard: View {
             }
             if let memo = saved?.memo {
                 Text(memo).font(.subheadline)
+            }
+            if note != nil {
+                Button("Notes", systemImage: "doc.text") { showsNote = true }
+                    .font(.subheadline)
             }
             HStack(spacing: 12) {
                 if let folderTitle {
@@ -517,6 +532,25 @@ private struct PlaceCard: View {
         .background(.regularMaterial, in: .rect(cornerRadius: 16))
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
+        .sheet(isPresented: $showsNote) {
+            if let note {
+                NavigationStack {
+                    ScrollView {
+                        MarkdownView(blocks: MarkdownParser.parse(note).blocks)
+                            .padding(.horizontal, 20)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                        .navigationTitle(saved?.name ?? target.name)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") { showsNote = false }
+                            }
+                        }
+                }
+                .presentationDetents([.medium, .large])
+            }
+        }
     }
 
     private var actions: some View {

@@ -110,6 +110,9 @@ struct MapDocument: Sendable {
 
     static func fileName(for folderID: Int) -> String { "\(folderID).json" }
 
+    /// Optional research note for a place or folder, kept beside the JSON so the app's rewrites never drop it.
+    static func noteFileName(for id: Int) -> String { "notes/\(id).md" }
+
     /// `folders.json`, with each folder's `count` kept in step with its places.
     func indexJSON() throws -> String {
         struct Index: Encodable { var version = 1; var folders: [MapFolder] }
@@ -228,6 +231,19 @@ final class MapDocumentModel {
         guard var document, let i = document.places.firstIndex(where: { $0.id == id }) else { return }
         let folder = document.places.remove(at: i).folderID
         commit(document, folders: [folder])
+        deleteNote(for: id)
+    }
+
+    /// The place's or folder's `notes/<id>.md`, if there is one.
+    func note(for id: Int) async -> String? {
+        let file = path.appending(MapDocument.noteFileName(for: id))
+        guard store.repository.exists(file) else { return nil }
+        return (try? await store.repository.readText(at: file)).nilIfBlank
+    }
+
+    private func deleteNote(for id: Int) {
+        let file = path.appending(MapDocument.noteFileName(for: id))
+        if store.repository.exists(file) { try? store.repository.delete(file) }
     }
 
     /// Whether a place at this spot is already saved, so search results can show it as saved.
@@ -283,9 +299,11 @@ final class MapDocumentModel {
     func deleteFolder(_ id: Int) {
         guard var document else { return }
         let removed = document.subtree(of: id)
+        let removedNotes = removed.union(document.places.filter { removed.contains($0.folderID) }.map(\.id))
         document.folders.removeAll { removed.contains($0.id) }
         document.places.removeAll { removed.contains($0.folderID) }
         self.document = document
+        defer { removedNotes.forEach(deleteNote) }
         do {
             try store.save(try document.indexJSON(), to: path.appending("folders.json"))
             for id in removed {
