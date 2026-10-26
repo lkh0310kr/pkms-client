@@ -57,6 +57,20 @@ There's no separate viewer. A note is always the editor, and it works like Obsid
 - **When it syncs:** on launch (after the local vault is shown), on returning to the foreground (at most once a minute), on pull-to-refresh, and from Settings → Sync Now.
 - **Not handled yet:** hidden paths (`.github/`, `.obsidian/`), symlinks and submodules are skipped. Repositories too large for GitHub's tree API aren't supported yet.
 
+## On-device Claude Code (experimental)
+
+PKMS can bundle NodeMobile and run the JavaScript Claude Code CLI inside the iOS app process. The CLI's current distribution includes native executable components that iOS cannot launch as child processes, so this prototype pins the last JavaScript-only release, Claude Code `2.1.112`, with Node `24.22.1`. This is an older Claude Code release and may stop working with Anthropic service changes; it is not equivalent to the current desktop CLI.
+
+To prepare the large upstream runtime and CLI assets before building:
+
+```sh
+python3 scripts/prepare-claude-code-runtime.py
+```
+
+The script downloads the NodeMobile iOS framework and the pinned CLI package into ignored `AgentRuntime/Vendor/` and `AgentRuntime/RuntimeTemplate/` folders. Open the project in Xcode and build the `PKMS` scheme; Swift Package Manager resolves SwiftTerm and Xcode copies the runtime folder into the app. On the device, open a local vault and choose **Claude Code** from a folder's agent menu. Claude's own sign-in and model requests are still handled by Anthropic's CLI service; the vault workspace itself is the app's local vault directory. CLI credentials are stored under the app's Claude home with iOS complete file protection and excluded from device backups.
+
+If the vault has an `.aiignore` file, PKMS translates matching paths into Claude Code `Read` and `Edit` deny rules for the CLI session. These are best-effort agent permissions, not an iOS filesystem sandbox: arbitrary code or shell-like tools can bypass them. Review `.aiignore` before using an agent with sensitive notes. This prototype does not run Codex CLI or Cursor CLI on-device.
+
 ## Supported syntax
 
 Headings, emphasis, strikethrough, inline and fenced code, links, nested, ordered, and task lists, blockquotes, rules, GFM tables, and images (relative paths, remote URLs). Obsidian-style syntax: `[[Page]]`, `[[Page|Alias]]`, `![[image.png]]`. YAML front matter is hidden.

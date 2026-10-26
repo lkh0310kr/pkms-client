@@ -8,7 +8,11 @@
 
 /* Begin PBXBuildFile section */
 		A10000000000000000000001 /* SampleVault in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* SampleVault */; };
+		A10000000000000000000004 /* RuntimeTemplate in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* RuntimeTemplate */; };
 		A10000000000000000000002 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* Markdown */; };
+		B10000000000000000000001 /* NodeMobile.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* NodeMobile.framework */; };
+		B10000000000000000000002 /* NodeMobile.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* NodeMobile.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		B10000000000000000000003 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = B90000000000000000000002 /* SwiftTerm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -33,6 +37,8 @@
 		A20000000000000000000002 /* PKMSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PKMSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000003 /* SampleVault */ = {isa = PBXFileReference; lastKnownFileType = folder; path = SampleVault; sourceTree = "<group>"; };
 		A20000000000000000000004 /* PKMSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PKMSUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000005 /* RuntimeTemplate */ = {isa = PBXFileReference; lastKnownFileType = folder; path = AgentRuntime/RuntimeTemplate; sourceTree = SOURCE_ROOT; };
+		B20000000000000000000001 /* NodeMobile.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = AgentRuntime/Vendor/NodeMobile.xcframework; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -59,6 +65,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000002 /* Markdown in Frameworks */,
+				B10000000000000000000001 /* NodeMobile.framework in Frameworks */,
+				B10000000000000000000003 /* SwiftTerm in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -76,6 +84,17 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B70000000000000000000001 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				B10000000000000000000002 /* NodeMobile.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -86,6 +105,7 @@
 				A60000000000000000000002 /* PKMSTests */,
 				A60000000000000000000003 /* PKMSUITests */,
 				A20000000000000000000003 /* SampleVault */,
+				A20000000000000000000005 /* RuntimeTemplate */,
 				A80000000000000000000002 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -110,6 +130,7 @@
 				AC0000000000000000000001 /* Sources */,
 				A70000000000000000000001 /* Frameworks */,
 				AD0000000000000000000001 /* Resources */,
+				B70000000000000000000001 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -121,6 +142,7 @@
 			name = PKMS;
 			packageProductDependencies = (
 				A90000000000000000000002 /* Markdown */,
+				B90000000000000000000002 /* SwiftTerm */,
 			);
 			productName = PKMS;
 			productReference = A20000000000000000000001 /* PKMS.app */;
@@ -202,6 +224,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A90000000000000000000001 /* XCRemoteSwiftPackageReference "swift-markdown" */,
+				B90000000000000000000001 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A80000000000000000000002 /* Products */;
@@ -221,6 +244,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000001 /* SampleVault in Resources */,
+				A10000000000000000000004 /* RuntimeTemplate in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -496,6 +520,11 @@
 				minimumVersion = 0.9.0;
 			};
 		};
+		B90000000000000000000001 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
+			requirement = {kind = exactVersion; version = 1.13.0; };
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -503,6 +532,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A90000000000000000000001 /* XCRemoteSwiftPackageReference "swift-markdown" */;
 			productName = Markdown;
+		};
+		B90000000000000000000002 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B90000000000000000000001 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
