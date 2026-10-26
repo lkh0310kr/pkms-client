@@ -48,14 +48,18 @@ struct DocumentView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarRole(.editor)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                Picker("Note mode", selection: modeSelection) {
-                    Label("Read", systemImage: "book").tag(DocumentMode.read)
-                    Label("Edit", systemImage: "pencil").tag(DocumentMode.edit)
+            ToolbarItem(placement: .topBarTrailing) {
+                HStack(spacing: 2) {
+                    modeButton(.read, symbol: "book")
+                    modeButton(.edit, symbol: "pencil")
                 }
-                .pickerStyle(.segmented)
+                .padding(3)
+                .background(.thinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.quaternary))
                 .fixedSize()
                 .accessibilityLabel("Reading and editing mode")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 SyncStatusIcon()
             }
         }
@@ -89,6 +93,26 @@ struct DocumentView: View {
             }
             mode = newMode
         }
+    }
+
+    private func modeButton(_ option: DocumentMode, symbol: String) -> some View {
+        Button {
+            modeSelection.wrappedValue = option
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(mode == option ? Color.accentColor : Color.secondary)
+                .frame(width: 32, height: 30)
+                .background {
+                    if mode == option {
+                        Capsule().fill(Color.accentColor.opacity(0.14))
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(option == .read ? "Read mode" : "Edit mode")
+        .accessibilityAddTraits(mode == option ? .isSelected : [])
     }
 
     /// Renaming from the title menu renames the file.
