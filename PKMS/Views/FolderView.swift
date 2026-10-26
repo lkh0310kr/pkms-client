@@ -56,10 +56,9 @@ struct FolderView: View {
                     Button("New Note", systemImage: "square.and.pencil") { createNote() }
                     Button("New Folder", systemImage: "folder.badge.plus") { startNaming(.newFolder) }
                 } label: {
-                    Label("New Note", systemImage: "square.and.pencil")
-                } primaryAction: {
-                    createNote()
+                    Image(systemName: "ellipsis.circle")
                 }
+                .accessibilityLabel("Folder actions")
             }
         }
         .alert(namingTitle, isPresented: isNaming) {
