@@ -15,6 +15,8 @@ struct DocumentView: View {
     @State private var focusOnAppear = false
     @State private var controller = EditorController()
     @State private var reviewingConflict = false
+    @State private var isRenaming = false
+    @State private var renameText = ""
 
     var body: some View {
         Group {
@@ -44,7 +46,7 @@ struct DocumentView: View {
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) { conflictBanner }
-        .navigationTitle(titleBinding)
+        .navigationTitle(path.baseName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -61,6 +63,19 @@ struct DocumentView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 SyncStatusIcon()
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("Rename", systemImage: "pencil") {
+                        renameText = path.baseName
+                        isRenaming = true
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("More note actions")
+            }
         }
         .task(id: path) {
             await load()
@@ -76,6 +91,11 @@ struct DocumentView: View {
             if let copy = sync.conflicts[path] {
                 ConflictReviewView(path: path, remoteCopy: copy)
             }
+        }
+        .alert("Rename Note", isPresented: $isRenaming) {
+            TextField("Name", text: $renameText)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") { renameNote() }
         }
     }
 
@@ -114,13 +134,10 @@ struct DocumentView: View {
         .accessibilityAddTraits(mode == option ? .isSelected : [])
     }
 
-    /// Renaming from the title menu renames the file.
-    private var titleBinding: Binding<String> {
-        Binding {
-            path.baseName
-        } set: { newTitle in
-            Task { try? await store.rename(path, to: newTitle) }
-        }
+    private func renameNote() {
+        let title = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title != path.baseName else { return }
+        Task { try? await store.rename(path, to: title) }
     }
 
     @ViewBuilder
