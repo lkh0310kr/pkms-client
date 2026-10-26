@@ -46,7 +46,6 @@ final class MarkdownHighlighter {
     private let bullet = regex(#"^([ \t]*)([-*+])( )"#)
     private let ordered = regex(#"^([ \t]*)(\d{1,9}[.)] )"#)
     private let rule = regex(#"^[ \t]*([-*_])([ \t]*\1){2,}[ \t]*$"#)
-    private let imageLine = regex(#"^[ \t]*(?:!\[[^\]\n]*\]\(([^)\n]+)\)|!\[\[([^\]\n|]+)(?:\|[^\]\n]*)?\]\])[ \t]*$"#)
     private let boldItalic = regex(#"(\*\*\*|___)(?=\S)(.+?)(?<=\S)\1"#)
     private let bold = regex(#"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"#)
     private let italic = regex(#"(?<![*_\w])([*_])(?=\S)([^*_\n]+?)(?<=\S)\1(?![*_\w])"#)
@@ -179,10 +178,7 @@ final class MarkdownHighlighter {
         }
 
         // Standalone images.
-        if !active, let m = first(imageLine) {
-            let source = m.range(at: 1).location != NSNotFound
-                ? text.substring(with: m.range(at: 1))
-                : WikiLink.url(for: text.substring(with: m.range(at: 2)))
+        if !active, let source = standaloneImageSource(text.substring(with: line)) {
             switch widgets.image(forSource: source) {
             case .failed:
                 storage.addAttribute(.foregroundColor, value: UIColor.secondaryLabel, range: line)
@@ -308,6 +304,15 @@ final class MarkdownHighlighter {
                   storage.attribute(.mdCollapsed, at: m.range.location, effectiveRange: nil) == nil else { return }
             storage.addAttributes([.foregroundColor: UIColor.tintColor, .mdLink: text.substring(with: m.range)], range: m.range)
         }
+    }
+
+    /// Use the Markdown parser for image targets so paths with spaces, parentheses,
+    /// optional titles, and wiki embeds all resolve the same way in every view.
+    private func standaloneImageSource(_ sourceLine: String) -> String? {
+        guard sourceLine.contains("![") else { return nil }
+        let blocks = MarkdownParser.parse(sourceLine).blocks
+        guard blocks.count == 1, case .image(let source, _) = blocks[0] else { return nil }
+        return source
     }
 
     // MARK: - Widgets

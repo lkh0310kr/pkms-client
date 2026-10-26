@@ -100,6 +100,12 @@ final class WidgetCache {
         if case .image(let image) = entries[source] { return image }
         return nil
     }
+
+    /// Images can be replaced or created by sync while the note stays open.
+    func invalidateImages() {
+        entries = entries.filter { $0.key.hasPrefix("table|") }
+        onChange()
+    }
 }
 
 /// Hides syntax glyphs and draws decorations.

@@ -60,7 +60,10 @@ struct NoteEditorView: View {
             saveNow()
             store.unregisterFlush(flushID)
         }
-        .onChange(of: store.revision) { mergeChangesFromDisk() }
+        .onChange(of: store.revision) {
+            widgets.invalidateImages()
+            mergeChangesFromDisk()
+        }
     }
 
     // MARK: - Images
