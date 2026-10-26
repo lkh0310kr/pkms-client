@@ -30,7 +30,10 @@ struct GitHubRemote: RemoteVault {
         // Regular files only (no symlinks or submodules), skipping hidden paths like `.github/` or `.obsidian/`.
         for entry in tree.tree where entry.type == "blob" && ["100644", "100755"].contains(entry.mode) {
             let parts = entry.path.split(separator: "/", omittingEmptySubsequences: false)
-            guard !parts.contains(where: { $0.isEmpty || $0.hasPrefix(".") }) else { continue }
+            // The vault root's .aiignore is policy input for the on-device agent. Keep all
+            // other hidden repository content private and out of the app's synced vault.
+            let isRootAIIgnore = parts.count == 1 && parts[0] == ".aiignore"
+            guard isRootAIIgnore || !parts.contains(where: { $0.isEmpty || $0.hasPrefix(".") }) else { continue }
             files[VaultPath(components: parts.map(String.init))] = entry.sha
         }
         return files
@@ -369,6 +372,12 @@ struct SyncEngine: Sendable {
         for case let url as URL in enumerator {
             guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
             paths.append(VaultPath(components: Array(url.resolvingSymlinksInPath().pathComponents.dropFirst(rootCount))))
+        }
+        // This one hidden root file is deliberately part of the local sync state because the
+        // agent uses it to enforce the user's PKMS ignore rules.
+        let ignoreURL = root.appending(path: ".aiignore", directoryHint: .notDirectory)
+        if FileManager.default.fileExists(atPath: ignoreURL.path(percentEncoded: false)) {
+            paths.append(VaultPath(".aiignore"))
         }
         return paths
     }
