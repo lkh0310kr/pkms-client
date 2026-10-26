@@ -46,7 +46,6 @@ struct DocumentView: View {
         .safeAreaInset(edge: .top, spacing: 0) { conflictBanner }
         .navigationTitle(titleBinding)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarRole(.editor)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 2) {
