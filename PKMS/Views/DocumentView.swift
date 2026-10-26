@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// Shows one note in the live-preview editor: it reads like a rendered page and becomes editable
-/// wherever you tap, like Obsidian or Notion. There's no separate viewing mode.
+/// Shows a note in a rendered reading view or the live-preview Markdown editor.
 struct DocumentView: View {
     let path: VaultPath
 
@@ -12,6 +11,7 @@ struct DocumentView: View {
     @State private var text: String?
     @State private var loadError: String?
     @State private var editorText = ""
+    @State private var mode = DocumentMode.read
     @State private var focusOnAppear = false
     @State private var controller = EditorController()
     @State private var reviewingConflict = false
@@ -19,8 +19,23 @@ struct DocumentView: View {
     var body: some View {
         Group {
             if let text {
-                NoteEditorView(path: path, initialText: text, focusOnAppear: focusOnAppear, text: $editorText,
-                               controller: controller, onOpenLink: open, onEndEditing: finishEditing)
+                switch mode {
+                case .read:
+                    ScrollView {
+                        MarkdownView(blocks: MarkdownParser.parse(editorText.isEmpty ? text : editorText).blocks, lazy: true)
+                            .environment(\.markdownDocumentPath, path)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .environment(\.openURL, OpenURLAction { url in
+                        open(url.absoluteString)
+                        return .handled
+                    })
+                case .edit:
+                    NoteEditorView(path: path, initialText: text, focusOnAppear: focusOnAppear, text: $editorText,
+                                   controller: controller, onOpenLink: open, onEndEditing: finishEditing)
+                }
             } else if let loadError {
                 ContentUnavailableView("Couldn’t Open Note", systemImage: "exclamationmark.triangle",
                                        description: Text(loadError))
@@ -33,16 +48,23 @@ struct DocumentView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarRole(.editor)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) { SyncStatusIcon() }
-            if controller.isFocused {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { controller.dismissKeyboard() }
-                        .fontWeight(.semibold)
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Picker("Note mode", selection: modeSelection) {
+                    Label("Read", systemImage: "book").tag(DocumentMode.read)
+                    Label("Edit", systemImage: "pencil").tag(DocumentMode.edit)
                 }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                .accessibilityLabel("Reading and editing mode")
+                SyncStatusIcon()
             }
         }
-        .task {
+        .task(id: path) {
             await load()
+        }
+        .onChange(of: store.revision) {
+            guard mode == .read else { return }
+            Task { await refreshReadContent() }
         }
         .onDisappear {
             if controller.isFocused { finishEditing() }
@@ -51,6 +73,21 @@ struct DocumentView: View {
             if let copy = sync.conflicts[path] {
                 ConflictReviewView(path: path, remoteCopy: copy)
             }
+        }
+    }
+
+    private var modeSelection: Binding<DocumentMode> {
+        Binding {
+            mode
+        } set: { newMode in
+            guard newMode != mode else { return }
+            if mode == .edit, newMode == .read {
+                let wasFocused = controller.isFocused
+                controller.dismissKeyboard()
+                if !wasFocused { finishEditing() }
+                focusOnAppear = false
+            }
+            mode = newMode
         }
     }
 
@@ -89,18 +126,31 @@ struct DocumentView: View {
     // MARK: - Loading and editing
 
     private func load() async {
+        mode = .read
+        focusOnAppear = false
+        text = nil
+        editorText = ""
+        loadError = nil
         do {
             let loaded = try await store.repository.readText(at: path)
             editorText = loaded
             if store.pendingEdit == path {
                 store.pendingEdit = nil
                 focusOnAppear = true
+                mode = .edit
             }
             text = loaded
             store.recordView(path)
         } catch {
             loadError = error.localizedDescription
         }
+    }
+
+    private func refreshReadContent() async {
+        guard mode == .read, let disk = try? await store.repository.readText(at: path), mode == .read else { return }
+        guard disk != editorText else { return }
+        editorText = disk
+        text = disk
     }
 
     /// When the keyboard goes away: name new notes after their first line and sync soon.
@@ -138,6 +188,11 @@ struct DocumentView: View {
             openDocument(resolved)
         }
     }
+}
+
+private enum DocumentMode: Hashable {
+    case read
+    case edit
 }
 
 /// A small cloud icon summarizing sync: uploading, waiting to upload, failed, or all synced.
