@@ -9,8 +9,12 @@ struct FolderView: View {
 
     @Environment(VaultStore.self) private var store
     @Environment(SyncController.self) private var sync
+    @Environment(\.openFolder) private var openFolder
+    @Environment(\.openNote) private var openNote
     @State private var query = ""
     @State private var showsSettings = false
+    @State private var showsAgent = false
+    @State private var showsOnDeviceClaude = false
     @State private var naming: NamingTask?
     @State private var nameText = ""
     @State private var pendingDelete: VaultNode?
@@ -37,6 +41,8 @@ struct FolderView: View {
                 list
                     .searchable(text: $query, prompt: "Search notes")
                     .sheet(isPresented: $showsSettings) { SettingsView() }
+                    .sheet(isPresented: $showsAgent) { AgentView() }
+                    .sheet(isPresented: $showsOnDeviceClaude) { OnDeviceClaudeView() }
             } else {
                 list
             }
@@ -45,6 +51,14 @@ struct FolderView: View {
             if folder.isRoot {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Settings", systemImage: "gearshape") { showsSettings = true }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button("Codex · ChatGPT", systemImage: "sparkles") { showsAgent = true }
+                        Button("Claude Code · on this iPhone", systemImage: "terminal") { showsOnDeviceClaude = true }
+                    } label: {
+                        Label("Agent", systemImage: "sparkles")
+                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showsSettings = true } label: { SyncStatusIcon() }
@@ -89,7 +103,9 @@ struct FolderView: View {
         List(selection: $selection) {
             if !query.isEmpty {
                 ForEach(store.index.search(query), id: \.path.string) { file in
-                    NavigationLink(value: file.path) {
+                    Button {
+                        openNote(file.path)
+                    } label: {
                         Label {
                             VStack(alignment: .leading) {
                                 Text(file.displayName)
@@ -101,7 +117,7 @@ struct FolderView: View {
                             Image(systemName: "doc.text")
                         }
                     }
-                    .tag(Optional(file.path))
+                    .buttonStyle(.plain)
                 }
             } else {
                 // Rows are keyed by string so only documents carry a `VaultPath` selection tag;
@@ -144,7 +160,9 @@ struct FolderView: View {
 
     /// Notes opened most recently. Shown on the vault root, the way Notion lists recent pages.
     private func recentRow(_ file: VaultNode) -> some View {
-        NavigationLink(value: file.path) {
+        Button {
+            openNote(file.path)
+        } label: {
             Label {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(file.displayName)
@@ -160,7 +178,7 @@ struct FolderView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
-        .tag(Optional(file.path))
+        .buttonStyle(.plain)
     }
 
     private func locationTitle(_ path: VaultPath) -> String {
@@ -171,13 +189,26 @@ struct FolderView: View {
     @ViewBuilder
     private func row(for child: VaultNode) -> some View {
         if child.isFolder {
-            NavigationLink(value: FolderRoute(path: child.path)) {
-                Label(child.displayName, systemImage: "folder")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+            Button {
+                openFolder(FolderRoute(path: child.path))
+            } label: {
+                HStack(spacing: 10) {
+                    Label(child.displayName, systemImage: "folder")
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            // Folders push through openFolder; they are never list selections.
+            .tag(Optional<VaultPath>.none)
         } else {
-            NavigationLink(value: child.path) {
+            Button {
+                openNote(child.path)
+            } label: {
                 Label {
                     Text(child.displayName)
                 } icon: {
@@ -187,7 +218,7 @@ struct FolderView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
-            .tag(Optional(child.path))
+            .buttonStyle(.plain)
         }
     }
 

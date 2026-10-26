@@ -6,6 +6,16 @@ struct FolderRoute: Hashable {
     let path: VaultPath
 }
 
+struct OpenFolderAction {
+    let handler: @MainActor (FolderRoute) -> Void
+    @MainActor func callAsFunction(_ route: FolderRoute) { handler(route) }
+}
+
+struct OpenNoteAction {
+    let handler: @MainActor (VaultPath) -> Void
+    @MainActor func callAsFunction(_ path: VaultPath) { handler(path) }
+}
+
 /// Opens another vault document on top of the current one, e.g. when a link is tapped.
 struct OpenDocumentAction {
     let handler: @MainActor (VaultPath) -> Void
@@ -13,12 +23,16 @@ struct OpenDocumentAction {
 }
 
 extension EnvironmentValues {
+    @Entry var openFolder = OpenFolderAction { _ in }
+    @Entry var openNote = OpenNoteAction { _ in }
     @Entry var openDocument = OpenDocumentAction { _ in }
 }
 
 /// Split view on iPad (files | document); collapses into a single stack on iPhone.
 struct RootView: View {
     @Environment(VaultStore.self) private var store
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @State private var compactPath = NavigationPath()
     @State private var folderStack: [FolderRoute] = []
     @State private var selection: VaultPath?
     /// Documents opened by following links from the selected document.
@@ -34,27 +48,46 @@ struct RootView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            NavigationStack(path: $folderStack) {
-                FolderView(folder: .root, selection: $selection)
-                    .navigationDestination(for: FolderRoute.self) { route in
-                        FolderView(folder: route.path, selection: $selection)
-                    }
-            }
-        } detail: {
-            NavigationStack(path: $linkedDocuments) {
-                Group {
-                    if let selection {
-                        destination(for: selection).id(selection)
-                    } else {
-                        ContentUnavailableView("No Document Selected", systemImage: "doc.text",
-                                               description: Text("Choose a note from the sidebar."))
-                    }
+        Group {
+            if horizontalSizeClass == .compact {
+                // Use one explicit stack on iPhone instead of collapsing a split view.
+                NavigationStack(path: $compactPath) {
+                    FolderView(folder: .root, selection: $selection)
+                        .navigationDestination(for: FolderRoute.self) { route in
+                            FolderView(folder: route.path, selection: $selection)
+                        }
+                        .navigationDestination(for: VaultPath.self) { destination(for: $0) }
                 }
-                .navigationDestination(for: VaultPath.self) { destination(for: $0) }
+                .environment(\.openDocument, OpenDocumentAction { compactPath.append($0) })
+                .environment(\.openFolder, OpenFolderAction { compactPath.append($0) })
+                .environment(\.openNote, OpenNoteAction { compactPath.append($0) })
+            } else {
+                NavigationSplitView {
+                    NavigationStack(path: $folderStack) {
+                        FolderView(folder: .root, selection: $selection)
+                            .navigationDestination(for: FolderRoute.self) { route in
+                                FolderView(folder: route.path, selection: $selection)
+                            }
+                    }
+                    .environment(\.openFolder, OpenFolderAction { folderStack.append($0) })
+                    .environment(\.openNote, OpenNoteAction { selection = $0 })
+                } detail: {
+                    NavigationStack(path: $linkedDocuments) {
+                        Group {
+                            if let selection {
+                                destination(for: selection).id(selection)
+                            } else {
+                                ContentUnavailableView("No Document Selected", systemImage: "doc.text",
+                                                       description: Text("Choose a note from the sidebar."))
+                            }
+                        }
+                        .navigationDestination(for: VaultPath.self) { destination(for: $0) }
+                    }
+                    .environment(\.openDocument, OpenDocumentAction { linkedDocuments.append($0) })
+                }
             }
-            .environment(\.openDocument, OpenDocumentAction { linkedDocuments.append($0) })
         }
+        .background(ClaudeRuntimeHost().frame(width: 1, height: 1).allowsHitTesting(false).accessibilityHidden(true))
         .onChange(of: selection) { old, new in
             // Following a rename keeps the navigation history; choosing another note resets it.
             if let move = store.lastMove, old?.movingPrefix(move.from, to: move.to) == new { return }
