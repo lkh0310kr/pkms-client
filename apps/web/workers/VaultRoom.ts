@@ -124,10 +124,9 @@ export class VaultRoom extends DurableObject<Env> {
 
     // Connect stores directory metadata only. File bodies are fetched when opened.
     for (const entry of tree.tree) {
-      if (entry.type !== "blob" || !["100644", "100755"].includes(entry.mode) || !validPath(entry.path)) continue;
+      if (entry.type !== "blob" || !["100644", "100755", "120000"].includes(entry.mode) || !validPath(entry.path)) continue;
       const size = entry.size;
       if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) throw new Error("GitHub did not provide a valid repository file size.");
-      if (size > MAX_GIT_FILE_BYTES || (isMarkdown(entry.path) && size > MAX_MARKDOWN_BYTES)) continue;
       const fileId = await this.stableFileId(body.repository, entry.path);
       this.ensureParents(entry.path, false);
       this.ctx.storage.sql.exec(
@@ -220,7 +219,7 @@ export class VaultRoom extends DurableObject<Env> {
     const revision = Number(this.getMeta("revision") ?? "0");
     const files = this.files().map((file) => ({
       id: file.file_id, path: file.path, kind: file.kind, revision: file.revision,
-      ...(file.kind === "asset" ? { contentType: "application/octet-stream", size: file.size } : {}),
+      ...(file.kind !== "folder" ? { size: file.size, ...(file.kind === "asset" ? { contentType: "application/octet-stream" } : {}) } : {}),
     }));
     return json({ workspaceId: this.ctx.id.toString(), revision, files, hasMore: false, nextRevision: revision, afterRevision: Number(url.searchParams.get("afterRevision") ?? 0) });
   }
@@ -244,6 +243,7 @@ export class VaultRoom extends DurableObject<Env> {
   private async getAsset(fileId: string): Promise<Response> {
     const file = this.file(fileId);
     if (!file || file.kind !== "asset") return json({ error: "not_found" }, { status: 404 });
+    if (file.size > MAX_GIT_FILE_BYTES) return json({ error: "file_too_large", maxBytes: MAX_GIT_FILE_BYTES }, { status: 413 });
     if (!file.object_key && file.sha) {
       const repository = this.getMeta("repository");
       if (!repository) return json({ error: "workspace_not_initialized" }, { status: 409 });
@@ -271,6 +271,7 @@ export class VaultRoom extends DurableObject<Env> {
   private async fileUpdates(fileId: string, vector: string | null): Promise<Response> {
     const file = this.file(fileId);
     if (!file || file.kind !== "markdown") return json({ error: "not_found" }, { status: 404 });
+    if (file.size > MAX_MARKDOWN_BYTES) return json({ error: "file_too_large", maxBytes: MAX_MARKDOWN_BYTES }, { status: 413 });
     let doc = this.document(fileId);
     if (!doc.getText("markdown").length && !file.content && file.sha) {
       const repository = this.getMeta("repository");
