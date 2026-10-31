@@ -91,6 +91,7 @@ export default function Home() {
   const [loadedFolders, setLoadedFolders] = useState<Set<string>>(() => new Set());
   const [focusedTreePath, setFocusedTreePath] = useState<string | null>(null);
   const [editorMode, setEditorMode] = useState<"live" | "source" | "read">("live");
+  const [showHiddenFiles, setShowHiddenFiles] = useState(false);
   const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true);
   const [activeFile, setActiveFile] = useState<FileRecord | null>(null);
   const [openTabs, setOpenTabs] = useState<FileRecord[]>([]);
@@ -114,6 +115,11 @@ export default function Home() {
   const pending = useRef(new Map<string, RealtimeMessage>());
   const hydrating = useRef(false);
   const autoSaveTimers = useRef(new Map<string, number>());
+
+  useEffect(() => {
+    if (!activeWorkspace) return;
+    setShowHiddenFiles(localStorage.getItem(`pkms:show-hidden:${activeWorkspace.id}`) === "true");
+  }, [activeWorkspace?.id]);
 
   const clearActiveFile = () => {
     const current = activeRef.current;
@@ -543,7 +549,8 @@ export default function Home() {
     setText(next);
   };
 
-  const treeRows = flattenTree(files, expandedFolders);
+  const visibleFiles = showHiddenFiles ? files : files.filter((file) => !file.path.split("/").some((part) => part.startsWith(".")));
+  const treeRows = flattenTree(visibleFiles, expandedFolders);
   const parentFolder = parentPath(currentFolder);
   const persistTreeScroll = (scrollTop: number) => {
     if (!activeWorkspace) return;
@@ -591,7 +598,7 @@ export default function Home() {
     }
   };
 
-  const quickOpenResults = [...new Map([...files, ...openTabs].filter((file) => file.kind !== "folder").map((file) => [file.id, file])).values()]
+  const quickOpenResults = [...new Map([...visibleFiles, ...openTabs].filter((file) => file.kind !== "folder").map((file) => [file.id, file])).values()]
     .filter((file) => !quickQuery.trim() || file.path.toLocaleLowerCase().includes(quickQuery.trim().toLocaleLowerCase()))
     .slice(0, 30);
 
@@ -688,6 +695,7 @@ export default function Home() {
         </div>
         {activeWorkspace && <>
           <div className="file-toolbar"><span className="eyebrow">FILES</span><div className="toolbar-actions">
+            <button className={`mini-button visibility-button${showHiddenFiles ? " active" : ""}`} title={showHiddenFiles ? "Hide hidden files" : "Show hidden files"} aria-label={showHiddenFiles ? "Hide hidden files" : "Show hidden files"} aria-pressed={showHiddenFiles} onClick={() => { const next = !showHiddenFiles; setShowHiddenFiles(next); localStorage.setItem(`pkms:show-hidden:${activeWorkspace.id}`, String(next)); }}>◌</button>
             <button className="mini-button" title="New note" onClick={newNote}>＋</button>
             <button className="mini-button" title="New folder" onClick={newFolder}>▱</button>
             <label className="mini-button upload-button" title="Upload file">↑<input type="file" onChange={(event) => { void uploadFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
@@ -740,7 +748,7 @@ export default function Home() {
         </section></div>}
         {quickOpen && <div className="modal-backdrop quick-open-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickOpen(false); }}><section className="quick-open-modal" role="dialog" aria-modal="true" aria-label="Quick open"><input ref={quickOpenInput} value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} placeholder="Search open and loaded files…" onKeyDown={(event) => { if (event.key === "Escape") setQuickOpen(false); else if (event.key === "Enter" && quickOpenResults[0]) { void openFile(quickOpenResults[0]); setQuickOpen(false); } }} /><div className="quick-open-results">{quickOpenResults.map((file) => <button key={file.id} onClick={() => { void openFile(file); setQuickOpen(false); }}><span>{entryName(file.path)}</span><small>{file.path}</small></button>)}{!quickOpenResults.length && <p className="empty-hint">No loaded files found</p>}</div></section></div>}
         {!activeWorkspace ? <div className="empty-workspace"><h2>No workspace</h2><button className="primary-button" onClick={openRepositoryPicker}>Connect repository</button></div> : !activeFile ? <div className="empty-workspace"><h2>No file open</h2><button className="primary-button" onClick={newNote}>New note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout">
-          <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div><div className="editor-controls"><div className="editor-mode-switch" role="group" aria-label="Editor view"><button className={editorMode === "live" ? "active" : ""} onClick={() => setEditorMode("live")}>Live</button><button className={editorMode === "source" ? "active" : ""} onClick={() => setEditorMode("source")}>Source</button><button className={editorMode === "read" ? "active" : ""} onClick={() => setEditorMode("read")}>Read</button></div><button className="save-button" onClick={saveActiveFileNow} title="Save now (⌘S / Ctrl+S)">Save</button></div></div>
+          <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div><div className="editor-controls"><label className="editor-mode-select"><span className="sr-only">Editor view</span><select value={editorMode} onChange={(event) => setEditorMode(event.target.value as "live" | "source" | "read")}><option value="live">Live</option><option value="source">Source</option><option value="read">Read</option></select><span aria-hidden="true">{editorMode === "source" ? "Source" : editorMode === "read" ? "Read" : "Live"}⌄</span></label><button className="save-button" onClick={saveActiveFileNow} title="Save now (⌘S / Ctrl+S)">Save</button></div></div>
           <div className={`editor-columns mode-${editorMode}`}><div className="source-column"><div className="column-label">WRITE</div><Suspense fallback={<div className="editor-loading">Opening editor…</div>}><MarkdownCodeEditor key={activeFile.id} value={text} onChange={handleText} /></Suspense></div><div className="preview-column"><div className="column-label">PREVIEW</div><article className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></article></div></div>
         </div> : <div className="asset-view"><div className="file-icon large">◇</div><h2>{activeFile.path.split("/").at(-1)}</h2><p>{activeFile.size ? `${(activeFile.size / 1024).toFixed(1)} KB` : "Attachment"}</p><a className="primary-button" href={`/api/workspaces/${activeWorkspace.id}/assets/${activeFile.id}`} target="_blank" rel="noreferrer">Open file</a></div>}
         {sync.githubStatus === "external-change" && <div className="external-warning"><strong>GitHub branch changed outside PKMS.</strong><span>PKMS paused its commit so it won’t overwrite that change. {sync.message}</span></div>}

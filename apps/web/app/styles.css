@@ -63,6 +63,8 @@ button { cursor: pointer; }
 .icon-button { width: 30px; height: 30px; font-size: 19px; }
 .mini-button { width: 26px; height: 26px; font-size: 15px; }
 .icon-button:hover, .mini-button:hover, .modal-close:hover { color: var(--text); background: var(--hover); }
+.mini-button.active { color: var(--text); background: var(--selected); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 .workspace-select { padding: 12px 7px 15px; border-top: 1px solid var(--border); }
 .eyebrow { color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
 .workspace-select select { display: block; width: 100%; margin-top: 7px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px; outline-color: var(--muted); color: var(--text); background: var(--surface); font-size: 12px; }
@@ -113,9 +115,9 @@ button { cursor: pointer; }
 .editor-heading { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding: 3px 0 14px; }
 .editor-title-block { min-width: 0; }
 .editor-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
-.editor-mode-switch { display: inline-flex; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--sidebar); }
-.editor-mode-switch button { min-height: 25px; padding: 0 9px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 11px; }
-.editor-mode-switch button.active { color: var(--text); background: var(--selected); }
+.editor-mode-select { position: relative; display: inline-flex; height: 29px; align-items: center; gap: 7px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface); font-size: 11px; }
+.editor-mode-select select { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
+.editor-mode-select:focus-within { outline: 1px solid var(--accent); }
 .save-button { min-height: 29px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface); font-size: 11px; }
 .save-button:hover { background: var(--hover); }
 .editor-heading h1 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.035em; }
@@ -183,7 +185,7 @@ button { cursor: pointer; }
   .mobile-explorer-closed .sidebar { height: 0; min-height: 0; max-height: 0; padding: 0; border: 0; }
   .sidebar-top { padding-bottom: 8px; }.workspace-select { padding: 6px 7px 8px; }.sidebar-bottom { display: none; }
   .main-panel { height: 100%; min-height: 0; }.topbar { height: 42px; flex-basis: 42px; font-size: 11px; }.save-label { font-size: 0; }.mobile-explorer-toggle { display: inline-flex; align-items: center; }
-  .editor-layout { height: auto; min-height: 0; padding: 10px; }.editor-heading { padding-bottom: 9px; }.editor-heading h1 { font-size: 19px; }.editor-controls { gap: 4px; }.editor-mode-switch button { padding: 0 6px; }
+  .editor-layout { height: auto; min-height: 0; padding: 10px; }.editor-heading { padding-bottom: 9px; }.editor-heading h1 { font-size: 19px; }.editor-controls { gap: 4px; }
   .editor-columns { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }.source-column { min-height: 0; border-right: 0; border-bottom: 1px solid var(--border); }.preview-column { min-height: 0; }.markdown-preview { padding: 7px 12px 20px; }
   .editor-columns.mode-source, .editor-columns.mode-read { grid-template-rows: minmax(0, 1fr); }
   .welcome-card { padding: 24px; }
