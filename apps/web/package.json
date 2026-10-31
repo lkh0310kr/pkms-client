@@ -1,7 +1,9 @@
 {
   "name": "@pkms/web",
   "private": true,
-  "engines": { "node": ">=22.22.0" },
+  "engines": {
+    "node": ">=22.22.0"
+  },
   "type": "module",
   "scripts": {
     "dev": "react-router dev",
@@ -10,6 +12,11 @@
     "typecheck": "react-router typegen && tsc --noEmit"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
     "isbot": "5.1.32",
     "react": "19.3.1",
     "react-dom": "19.3.1",

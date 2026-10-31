@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { IndexeddbPersistence } from "y-indexeddb";
 import * as Y from "yjs";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useSearchParams } from "react-router";
 import type { Route } from "./+types/home";
+
+const MarkdownCodeEditor = lazy(() => import("../components/MarkdownCodeEditor").then((module) => ({ default: module.MarkdownCodeEditor })));
 
 interface User { login: string; avatarUrl?: string }
 interface Repository { fullName: string; defaultBranch: string; private: boolean; canWrite: boolean }
@@ -35,6 +37,28 @@ function entryName(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
+interface TreeRow { file: FileRecord; depth: number }
+function flattenTree(files: FileRecord[], expanded: Set<string>): TreeRow[] {
+  const children = new Map<string, FileRecord[]>();
+  for (const file of files) {
+    const parent = parentPath(file.path);
+    const siblings = children.get(parent) ?? [];
+    siblings.push(file);
+    children.set(parent, siblings);
+  }
+  const rows: TreeRow[] = [];
+  const visit = (parent: string, depth: number) => {
+    const siblings = children.get(parent) ?? [];
+    siblings.sort((a, b) => Number(b.kind === "folder") - Number(a.kind === "folder") || entryName(a.path).localeCompare(entryName(b.path), undefined, { sensitivity: "base" }));
+    for (const file of siblings) {
+      rows.push({ file, depth });
+      if (file.kind === "folder" && expanded.has(file.path)) visit(file.path, depth + 1);
+    }
+  };
+  visit("", 0);
+  return rows;
+}
+
 function applyTextDiff(text: Y.Text, previous: string, next: string): void {
   if (previous === next) return;
   let prefix = 0;
@@ -63,7 +87,15 @@ export default function Home() {
   const [currentFolder, setCurrentFolder] = useState("");
   const [files, setFiles] = useState<FileRecord[]>([]);
   const [loadingFolder, setLoadingFolder] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => new Set([""]));
+  const [loadedFolders, setLoadedFolders] = useState<Set<string>>(() => new Set());
+  const [focusedTreePath, setFocusedTreePath] = useState<string | null>(null);
+  const [editorMode, setEditorMode] = useState<"live" | "source" | "read">("live");
+  const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true);
   const [activeFile, setActiveFile] = useState<FileRecord | null>(null);
+  const [openTabs, setOpenTabs] = useState<FileRecord[]>([]);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [quickQuery, setQuickQuery] = useState("");
   const [text, setText] = useState("");
   const [sync, setSync] = useState<SyncStatus>({ githubStatus: "pending", pendingFiles: 0 });
   const [loading, setLoading] = useState(true);
@@ -74,11 +106,14 @@ export default function Home() {
   const [saving, setSaving] = useState(false);
   const [peers, setPeers] = useState<Peer[]>([]);
   const socket = useRef<WebSocket | null>(null);
+  const treeRef = useRef<HTMLElement>(null);
+  const quickOpenInput = useRef<HTMLInputElement>(null);
   const openFileRef = useRef<((file: FileRecord) => Promise<void>) | null>(null);
   const docs = useRef(new Map<string, { doc: Y.Doc; persistence: IndexeddbPersistence; observer?: () => void; updateHandler?: (update: Uint8Array, origin: unknown) => void }>());
   const activeRef = useRef<{ file: FileRecord | null; doc: Y.Doc | null; text: Y.Text | null; value: string }>({ file: null, doc: null, text: null, value: "" });
   const pending = useRef(new Map<string, RealtimeMessage>());
   const hydrating = useRef(false);
+  const autoSaveTimer = useRef<number | null>(null);
 
   const clearActiveFile = () => {
     const current = activeRef.current;
@@ -103,6 +138,62 @@ export default function Home() {
     if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;
   }, []);
+
+  const saveMarkdownToGitHub = useCallback(async (fileId: string, doc: Y.Doc) => {
+    const workspaceId = activeWorkspace?.id;
+    if (!workspaceId) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/workspaces/${workspaceId}/files/${fileId}/updates`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operationId: id(), fileId, update: toBase64(Y.encodeStateAsUpdate(doc)) }),
+      });
+      const status = await api<SyncStatus>(`/api/workspaces/${workspaceId}/flush`, { method: "POST" });
+      setSync(status);
+      if (status.githubStatus === "synced") setNotice("Saved to GitHub");
+      else if (status.githubStatus === "external-change") setError(status.message ?? "GitHub changed outside PKMS.");
+      else setNotice("Saved locally");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save to GitHub");
+    } finally { setSaving(false); }
+  }, [activeWorkspace?.id, api]);
+
+  const scheduleAutoSave = useCallback((fileId: string, doc: Y.Doc) => {
+    setNotice("Unsaved");
+    if (autoSaveTimer.current !== null) window.clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = window.setTimeout(() => {
+      autoSaveTimer.current = null;
+      void saveMarkdownToGitHub(fileId, doc);
+    }, 5_000);
+  }, [saveMarkdownToGitHub]);
+
+  const saveActiveFileNow = useCallback(() => {
+    const current = activeRef.current;
+    if (!current.file || current.file.kind !== "markdown" || !current.doc) return;
+    if (autoSaveTimer.current !== null) window.clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = null;
+    void saveMarkdownToGitHub(current.file.id, current.doc);
+  }, [saveMarkdownToGitHub]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p" && activeWorkspace) {
+        event.preventDefault();
+        setQuickQuery("");
+        setQuickOpen(true);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s" && activeRef.current.file?.kind === "markdown") {
+        event.preventDefault();
+        saveActiveFileNow();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [activeWorkspace, saveActiveFileNow]);
+
+  useEffect(() => { if (quickOpen) quickOpenInput.current?.focus(); }, [quickOpen]);
 
   const refreshWorkspaces = useCallback(async () => {
     const result = await api<{ workspaces: Workspace[] }>("/api/workspaces");
@@ -194,7 +285,6 @@ export default function Home() {
       } else if (message.type === "ack" && message.operationId) {
         pending.current.delete(message.operationId);
         setSaving(pending.current.size > 0);
-        setNotice("Saved");
         if (message.conflictCopyPath) {
           void api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`).then(async (snapshot) => {
             setFiles(snapshot.files);
@@ -233,9 +323,21 @@ export default function Home() {
         setLoadingFolder(true);
         const result = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/directory`);
         if (!alive) return;
-        setFiles(result.files);
-        setCurrentFolder("");
+        const storageKey = `pkms:tree:${activeWorkspace.id}`;
+        let saved: { expanded?: string[]; currentFolder?: string; scrollTop?: number } = {};
+        try { saved = JSON.parse(localStorage.getItem(storageKey) ?? "{}"); } catch { saved = {}; }
+        const expanded = [...new Set(["", ...(saved.expanded ?? [])])];
+        const restored = await Promise.allSettled(expanded.filter(Boolean).map((path) => api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/directory?path=${encodeURIComponent(path)}`)));
+        if (!alive) return;
+        const restoredFiles = restored.flatMap((entry) => entry.status === "fulfilled" ? entry.value.files : []);
+        const loaded = new Set(["", ...expanded.filter((path, index) => index > 0 && restored[index - 1]?.status === "fulfilled")]);
+        setFiles([...result.files, ...restoredFiles]);
+        setCurrentFolder(saved.currentFolder ?? "");
+        setExpandedFolders(new Set(expanded));
+        setLoadedFolders(loaded);
+        setFocusedTreePath(null);
         setLoadingFolder(false);
+        requestAnimationFrame(() => { if (treeRef.current) treeRef.current.scrollTop = saved.scrollTop ?? 0; });
         const state = await api<SyncStatus>(`/api/workspaces/${activeWorkspace.id}/sync-status`);
         if (alive) setSync(state);
       } catch (cause) { if (alive) { setLoadingFolder(false); setError(cause instanceof Error ? cause.message : "Could not load workspace"); } }
@@ -247,8 +349,23 @@ export default function Home() {
     return () => { alive = false; window.clearInterval(timer); window.clearTimeout(retryTimer); socket.current?.close(); socket.current = null; setPeers([]); };
   }, [activeWorkspace, api, user]);
 
+  useEffect(() => {
+    if (!activeWorkspace || !loadedFolders.has("")) return;
+    localStorage.setItem(`pkms:tree:${activeWorkspace.id}`, JSON.stringify({ expanded: [...expandedFolders].filter(Boolean), currentFolder }));
+  }, [activeWorkspace?.id, currentFolder, expandedFolders, loadedFolders]);
+
   const openFile = useCallback(async (file: FileRecord) => {
     setNotice("");
+    if (window.matchMedia("(max-width: 580px)").matches) setMobileExplorerOpen(false);
+    const parent = parentPath(file.path);
+    setCurrentFolder(parent);
+    setExpandedFolders((current) => {
+      const next = new Set(current).add("");
+      let ancestor = parent;
+      while (ancestor) { next.add(ancestor); ancestor = parentPath(ancestor); }
+      return next;
+    });
+    setOpenTabs((current) => current.some((entry) => entry.id === file.id) ? current.map((entry) => entry.id === file.id ? file : entry) : [...current, file]);
     const previous = activeRef.current;
     if (previous.file && previous.text) {
       const oldEntry = docs.current.get(previous.file.id);
@@ -308,6 +425,7 @@ export default function Home() {
     if (entry.updateHandler) entry.doc.off("update", entry.updateHandler);
     const updateHandler = (updateBytes: Uint8Array, origin: unknown) => {
       if (origin === "server") return;
+      scheduleAutoSave(file.id, entry.doc);
       const current = socket.current;
       if (!current || current.readyState !== WebSocket.OPEN) return;
       const operationId = id();
@@ -325,23 +443,30 @@ export default function Home() {
       currentSocket.send(JSON.stringify({ type: "document-update", operationId, fileId: file.id, update: toBase64(Y.encodeStateAsUpdate(entry.doc)) }));
     }
     hydrating.current = false;
-  }, [activeWorkspace?.id, api]);
+  }, [activeWorkspace?.id, api, scheduleAutoSave]);
   openFileRef.current = openFile;
 
-  const openFolder = async (file: FileRecord) => {
+  const toggleFolder = async (file: FileRecord) => {
     if (!activeWorkspace) return;
-    clearActiveFile();
     setCurrentFolder(file.path);
+    setFocusedTreePath(file.path);
+    if (expandedFolders.has(file.path)) {
+      setExpandedFolders((current) => { const next = new Set(current); next.delete(file.path); return next; });
+      return;
+    }
+    setExpandedFolders((current) => new Set(current).add(file.path));
+    if (loadedFolders.has(file.path)) return;
     setLoadingFolder(true);
     try {
       const result = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/directory?path=${encodeURIComponent(file.path)}`);
       setFiles((current) => [...current.filter((entry) => parentPath(entry.path) !== file.path), ...result.files]);
+      setLoadedFolders((current) => new Set(current).add(file.path));
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not open folder"); }
     finally { setLoadingFolder(false); }
   };
 
   const chooseWorkspace = (workspace: Workspace) => {
-    setActiveWorkspace(workspace); clearActiveFile(); setCurrentFolder("");
+    setActiveWorkspace(workspace); clearActiveFile(); setOpenTabs([]); setCurrentFolder(""); setExpandedFolders(new Set([""])); setLoadedFolders(new Set());
   };
 
   const openRepositoryPicker = async () => {
@@ -358,6 +483,7 @@ export default function Home() {
     try {
       const result = await api<{ workspace: Workspace }>("/api/workspaces", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repository: repository.fullName, branch: repository.defaultBranch }) });
       setShowRepositories(false);
+      clearActiveFile(); setOpenTabs([]); setCurrentFolder(""); setExpandedFolders(new Set([""])); setLoadedFolders(new Set());
       await refreshWorkspaces();
       setActiveWorkspace(result.workspace);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not connect repository"); }
@@ -408,21 +534,77 @@ export default function Home() {
     setText(next);
   };
 
-  const visibleFiles = files.filter((file) => parentPath(file.path) === currentFolder);
+  const treeRows = flattenTree(files, expandedFolders);
   const parentFolder = parentPath(currentFolder);
+  const persistTreeScroll = (scrollTop: number) => {
+    if (!activeWorkspace) return;
+    const key = `pkms:tree:${activeWorkspace.id}`;
+    let saved: Record<string, unknown> = {};
+    try { saved = JSON.parse(localStorage.getItem(key) ?? "{}"); } catch { saved = {}; }
+    localStorage.setItem(key, JSON.stringify({ ...saved, scrollTop }));
+  };
+
+  const handleTreeKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    const index = treeRows.findIndex((row) => row.file.path === focusedTreePath);
+    const row = treeRows[index];
+    if (!row) return;
+    const focusRow = (next: TreeRow | undefined) => {
+      if (!next) return;
+      setFocusedTreePath(next.file.path);
+      requestAnimationFrame(() => treeRef.current?.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(next.file.path)}"]`)?.focus());
+    };
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      focusRow(treeRows[index + (event.key === "ArrowDown" ? 1 : -1)]);
+    } else if (event.key === "ArrowRight" && row.file.kind === "folder") {
+      event.preventDefault();
+      if (!expandedFolders.has(row.file.path)) void toggleFolder(row.file);
+      else if (treeRows[index + 1]?.depth === row.depth + 1) focusRow(treeRows[index + 1]);
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      if (row.file.kind === "folder" && expandedFolders.has(row.file.path)) void toggleFolder(row.file);
+      else focusRow(treeRows.find((candidate) => candidate.file.path === parentPath(row.file.path)));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      if (row.file.kind === "folder") void toggleFolder(row.file);
+      else void openFile(row.file);
+    }
+  };
+
+  const closeTab = (file: FileRecord) => {
+    const index = openTabs.findIndex((entry) => entry.id === file.id);
+    const nextTabs = openTabs.filter((entry) => entry.id !== file.id);
+    setOpenTabs(nextTabs);
+    if (activeFile?.id === file.id) {
+      const nextFile = nextTabs[Math.min(index, nextTabs.length - 1)];
+      if (nextFile) void openFile(nextFile);
+      else clearActiveFile();
+    }
+  };
+
+  const quickOpenResults = [...new Map([...files, ...openTabs].filter((file) => file.kind !== "folder").map((file) => [file.id, file])).values()]
+    .filter((file) => !quickQuery.trim() || file.path.toLocaleLowerCase().includes(quickQuery.trim().toLocaleLowerCase()))
+    .slice(0, 30);
 
   const updateFilePath = async (file: FileRecord, toPath: string) => {
     if (!activeWorkspace) return;
     try {
-      await api(`/api/workspaces/${activeWorkspace.id}/operations`, {
+      const result = await api<{ conflictCopyPath?: string }>(`/api/workspaces/${activeWorkspace.id}/operations`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "move", fileId: file.id, toPath } }),
       });
       const snapshot = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`);
       setFiles(snapshot.files);
+      setOpenTabs((current) => current.map((tab) => snapshot.files.find((entry) => entry.id === tab.id) ?? tab));
       if (activeFile?.id === file.id) setActiveFile(snapshot.files.find((entry) => entry.id === file.id) ?? null);
+      const destination = result.conflictCopyPath ?? toPath;
       if (file.kind === "folder" && (currentFolder === file.path || currentFolder.startsWith(`${file.path}/`))) {
-        setCurrentFolder(`${toPath}${currentFolder.slice(file.path.length)}`);
+        setCurrentFolder(`${destination}${currentFolder.slice(file.path.length)}`);
+      }
+      if (file.kind === "folder") {
+        const movePath = (path: string) => path === file.path || path.startsWith(`${file.path}/`) ? `${destination}${path.slice(file.path.length)}` : path;
+        setExpandedFolders((current) => new Set([...current].map(movePath)));
+        setLoadedFolders((current) => new Set([...current].map(movePath)));
       }
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not rename item"); }
   };
@@ -451,6 +633,7 @@ export default function Home() {
         body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "delete", fileId: activeFile.id } }),
       });
       clearActiveFile();
+      setOpenTabs((current) => current.filter((file) => file.id !== activeFile.id));
       setFiles((current) => current.filter((file) => file.id !== activeFile.id));
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not delete item"); }
   };
@@ -464,6 +647,8 @@ export default function Home() {
         body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "delete", fileId: folder.id } }),
       });
       setFiles((current) => current.filter((file) => file.path !== currentFolder && !file.path.startsWith(`${currentFolder}/`)));
+      setOpenTabs((current) => current.filter((file) => file.path !== currentFolder && !file.path.startsWith(`${currentFolder}/`)));
+      setExpandedFolders((current) => new Set([...current].filter((path) => path !== currentFolder && !path.startsWith(`${currentFolder}/`))));
       setCurrentFolder(parentFolder);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not delete folder"); }
   };
@@ -480,7 +665,7 @@ export default function Home() {
   );
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell${mobileExplorerOpen ? " mobile-explorer-open" : " mobile-explorer-closed"}`}>
       <aside className="sidebar">
         <div className="sidebar-top">
           <div className="brand-lockup"><div className="brand-mark small">P</div><span>PKMS</span></div>
@@ -502,10 +687,25 @@ export default function Home() {
             {!activeFile && currentFolder && <button className="mini-button" title="Rename folder" onClick={renameCurrentFolder}>✎</button>}
             {!activeFile && currentFolder && <button className="mini-button" title="Delete folder" onClick={() => void deleteCurrentFolder()}>×</button>}
           </div></div>
-          <nav className="file-list" aria-label="Files">
-            {currentFolder && <button className="folder-row" onClick={() => setCurrentFolder(parentFolder)}><span className="folder-icon">↰</span>..</button>}
-            {visibleFiles.map((file) => file.kind === "folder" ? <button className="folder-row" key={file.id} onClick={() => void openFolder(file)}><span className="folder-icon">▸</span>{entryName(file.path)}</button> : <button key={file.id} className={`file-row ${activeFile?.id === file.id ? "selected" : ""}`} onClick={() => void openFile(file)}><span className="file-icon">{file.kind === "markdown" ? "▤" : "◇"}</span><span>{entryName(file.path)}</span></button>)}
-            {!visibleFiles.length && <p className="empty-hint">{loadingFolder ? "Loading…" : "Empty"}</p>}
+          <nav ref={treeRef} className="file-list file-tree" role="tree" aria-label="Repository files" aria-busy={loadingFolder} onKeyDown={handleTreeKeyDown} onScroll={(event) => persistTreeScroll(event.currentTarget.scrollTop)}>
+            {treeRows.map(({ file, depth }, index) => <button
+              key={file.id}
+              type="button"
+              role="treeitem"
+              data-tree-path={file.path}
+              aria-level={depth + 1}
+              aria-expanded={file.kind === "folder" ? expandedFolders.has(file.path) : undefined}
+              tabIndex={focusedTreePath === file.path || (!focusedTreePath && index === 0) ? 0 : -1}
+              className={`tree-row ${file.kind === "folder" ? "folder-row" : "file-row"}${file.path === currentFolder && file.kind === "folder" ? " selected" : ""}${activeFile?.id === file.id ? " selected" : ""}`}
+              style={{ paddingLeft: 8 + depth * 14 }}
+              onFocus={() => setFocusedTreePath(file.path)}
+              onClick={() => file.kind === "folder" ? void toggleFolder(file) : void openFile(file)}
+            >
+              <span className="tree-chevron" aria-hidden="true">{file.kind === "folder" ? expandedFolders.has(file.path) ? "▾" : "▸" : ""}</span>
+              <span className="file-icon" aria-hidden="true">{file.kind === "folder" ? "▰" : file.kind === "markdown" ? "▤" : "◇"}</span>
+              <span className="tree-label">{entryName(file.path)}</span>
+            </button>)}
+            {!treeRows.length && <p className="empty-hint">{loadingFolder ? "Loading…" : "Empty folder"}</p>}
           </nav>
         </>}
         <div className="sidebar-bottom">
@@ -518,18 +718,21 @@ export default function Home() {
         <header className="topbar">
           <div className="breadcrumbs"><span>{activeWorkspace?.repository ?? "No workspace"}</span>{(activeFile || currentFolder) && <><span className="crumb-slash">/</span><span>{activeFile?.path ?? currentFolder}</span></>}</div>
           <div className="topbar-right">
+            <button className="mobile-explorer-toggle" onClick={() => setMobileExplorerOpen((open) => !open)} aria-expanded={mobileExplorerOpen} title="Toggle file tree">☰ Files</button>
             <span className={`save-label ${saving ? "active" : ""}`}><span className="status-dot" />{saving ? "Saving" : notice || (sync.githubStatus === "synced" ? "Synced" : "Saved")}</span>
             {peers.length > 1 && <div className="collaborators" aria-label="Collaborators"><span>{peers.length} here</span></div>}
           </div>
         </header>
+        {!!openTabs.length && <nav className="document-tabs" aria-label="Open documents">{openTabs.map((file) => <div key={file.id} className={`document-tab${activeFile?.id === file.id ? " active" : ""}`}><button className="document-tab-label" onClick={() => void openFile(file)} title={file.path}>{entryName(file.path)}</button><button className="document-tab-close" onClick={() => closeTab(file)} aria-label={`Close ${entryName(file.path)}`}>×</button></div>)}</nav>}
         {error && <button className="notice error dismissible" onClick={() => setError("")}>{error}<span>×</span></button>}
         {showRepositories && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowRepositories(false); }}><section className="repository-modal">
           <button className="modal-close" onClick={() => setShowRepositories(false)}>×</button><span className="eyebrow">GITHUB</span><h2>Choose a repository</h2>
           <div className="repository-list">{repositories.map((repository) => <button key={repository.fullName} className="repository-option" onClick={() => void connectRepository(repository)}><span className="repo-icon">{repository.private ? "◈" : "◇"}</span><span><strong>{repository.fullName}</strong><small>{repository.defaultBranch} · {repository.private ? "Private" : "Public"}</small></span><span className="option-arrow">→</span></button>)}{!repositories.length && <p className="empty-hint">No writable repositories found.</p>}</div>
         </section></div>}
+        {quickOpen && <div className="modal-backdrop quick-open-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickOpen(false); }}><section className="quick-open-modal" role="dialog" aria-modal="true" aria-label="Quick open"><input ref={quickOpenInput} value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} placeholder="Search open and loaded files…" onKeyDown={(event) => { if (event.key === "Escape") setQuickOpen(false); else if (event.key === "Enter" && quickOpenResults[0]) { void openFile(quickOpenResults[0]); setQuickOpen(false); } }} /><div className="quick-open-results">{quickOpenResults.map((file) => <button key={file.id} onClick={() => { void openFile(file); setQuickOpen(false); }}><span>{entryName(file.path)}</span><small>{file.path}</small></button>)}{!quickOpenResults.length && <p className="empty-hint">No loaded files found</p>}</div></section></div>}
         {!activeWorkspace ? <div className="empty-workspace"><h2>No workspace</h2><button className="primary-button" onClick={openRepositoryPicker}>Connect repository</button></div> : !activeFile ? <div className="empty-workspace"><h2>No file open</h2><button className="primary-button" onClick={newNote}>New note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout">
-          <div className="editor-heading"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div>
-          <div className="editor-columns"><div className="source-column"><div className="column-label">EDIT</div><textarea className="markdown-editor" aria-label="Markdown editor" spellCheck autoCapitalize="sentences" value={text} onChange={(event) => handleText(event.target.value)} placeholder="Start writing…" /></div><div className="preview-column"><div className="column-label">PREVIEW</div><article className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></article></div></div>
+          <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div><div className="editor-controls"><div className="editor-mode-switch" role="group" aria-label="Editor view"><button className={editorMode === "live" ? "active" : ""} onClick={() => setEditorMode("live")}>Live</button><button className={editorMode === "source" ? "active" : ""} onClick={() => setEditorMode("source")}>Source</button><button className={editorMode === "read" ? "active" : ""} onClick={() => setEditorMode("read")}>Read</button></div><button className="save-button" onClick={saveActiveFileNow} title="Save now (⌘S / Ctrl+S)">Save</button></div></div>
+          <div className={`editor-columns mode-${editorMode}`}><div className="source-column"><div className="column-label">WRITE</div><Suspense fallback={<div className="editor-loading">Opening editor…</div>}><MarkdownCodeEditor key={activeFile.id} value={text} onChange={handleText} /></Suspense></div><div className="preview-column"><div className="column-label">PREVIEW</div><article className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></article></div></div>
         </div> : <div className="asset-view"><div className="file-icon large">◇</div><h2>{activeFile.path.split("/").at(-1)}</h2><p>{activeFile.size ? `${(activeFile.size / 1024).toFixed(1)} KB` : "Attachment"}</p><a className="primary-button" href={`/api/workspaces/${activeWorkspace.id}/assets/${activeFile.id}`} target="_blank" rel="noreferrer">Open file</a></div>}
         {sync.githubStatus === "external-change" && <div className="external-warning"><strong>GitHub branch changed outside PKMS.</strong><span>PKMS paused its commit so it won’t overwrite that change. {sync.message}</span></div>}
       </section>
