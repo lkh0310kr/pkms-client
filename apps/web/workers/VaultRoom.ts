@@ -16,6 +16,10 @@ interface FileRow {
 }
 interface RefResponse { object: { sha: string } }
 interface TreeResponse { sha: string; tree: Array<{ path: string; mode: string; type: string; sha: string; size?: number }>; truncated: boolean }
+interface DirectoryRow { [key: string]: SqlStorageValue; path: string; tree_sha: string; loaded: number }
+class GitHubRequestError extends Error {
+  constructor(readonly status: number) { super("GitHub request failed"); this.name = "GitHubRequestError"; }
+}
 
 function asBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
   return value instanceof Uint8Array ? value : new Uint8Array(value);
@@ -37,6 +41,7 @@ function validPath(value: string): boolean {
 }
 
 function isMarkdown(path: string): boolean { return /\.md$/i.test(path); }
+function parentDirectory(path: string): string { const slash = path.lastIndexOf("/"); return slash < 0 ? "" : path.slice(0, slash); }
 
 function conflictName(path: string, client: string): string {
   const suffix = ` (conflict ${client.slice(0, 8)})`;
@@ -58,6 +63,7 @@ export class VaultRoom extends DurableObject<Env> {
       );
       CREATE TABLE IF NOT EXISTS documents (file_id TEXT PRIMARY KEY, state_update BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS operations (operation_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, result TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS directories (path TEXT PRIMARY KEY, tree_sha TEXT NOT NULL, loaded INTEGER NOT NULL DEFAULT 0);
       CREATE UNIQUE INDEX IF NOT EXISTS active_file_paths ON files (path) WHERE deleted = 0;
     `);
   }
@@ -91,9 +97,7 @@ export class VaultRoom extends DurableObject<Env> {
     headers.set("X-GitHub-Api-Version", "2022-11-28");
     headers.set("User-Agent", "PKMS-Cloud/1.0");
     const response = await fetch(`https://api.github.com${path}`, { ...init, headers });
-    if (!response.ok) {
-      throw new Error(`GitHub API request failed with status ${response.status}`);
-    }
+    if (!response.ok) throw new GitHubRequestError(response.status);
     return response;
   }
 
@@ -110,6 +114,8 @@ export class VaultRoom extends DurableObject<Env> {
     if (!body.accountLogin) return json({ error: "github_account_required" }, { status: 400 });
     if (this.getMeta("repository")) {
       this.setMeta("accountLogin", body.accountLogin);
+      const rootTree = this.getMeta("tree");
+      if (rootTree) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO directories (path,tree_sha,loaded) VALUES ('',?,0)", rootTree);
       return json({ ok: true, alreadyInitialized: true });
     }
     const [owner, repo] = body.repository.split("/");
@@ -119,25 +125,11 @@ export class VaultRoom extends DurableObject<Env> {
     const refPath = "/repos/" + owner + "/" + repo + "/git/ref/heads/" + body.branch.split("/").map(encodeURIComponent).join("/");
     const ref = await (await this.github(token, refPath)).json() as RefResponse;
     const commit = await (await this.github(token, "/repos/" + owner + "/" + repo + "/git/commits/" + ref.object.sha)).json() as { tree: { sha: string } };
-    const tree = await (await this.github(token, "/repos/" + owner + "/" + repo + "/git/trees/" + commit.tree.sha + "?recursive=1")).json() as TreeResponse;
-    if (tree.truncated) return json({ error: "repository_tree_too_large" }, { status: 413 });
-
-    // Connect stores directory metadata only. File bodies are fetched when opened.
-    for (const entry of tree.tree) {
-      if (entry.type !== "blob" || !["100644", "100755", "120000"].includes(entry.mode) || !validPath(entry.path)) continue;
-      const size = entry.size;
-      if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) throw new Error("GitHub did not provide a valid repository file size.");
-      const fileId = await this.stableFileId(body.repository, entry.path);
-      this.ensureParents(entry.path, false);
-      this.ctx.storage.sql.exec(
-        "INSERT INTO files (file_id,path,kind,content,object_key,size,sha,revision,deleted,dirty) VALUES (?,?,?,NULL,NULL,?,?,0,0,0) ON CONFLICT(file_id) DO UPDATE SET path=excluded.path,kind=excluded.kind,size=excluded.size,sha=excluded.sha,deleted=0",
-        fileId, entry.path, isMarkdown(entry.path) ? "markdown" : "asset", size, entry.sha
-      );
-    }
     this.setMeta("repository", body.repository);
     this.setMeta("branch", body.branch);
     this.setMeta("head", ref.object.sha);
     this.setMeta("tree", commit.tree.sha);
+    this.ctx.storage.sql.exec("INSERT OR REPLACE INTO directories (path,tree_sha,loaded) VALUES ('',?,0)", commit.tree.sha);
     this.setMeta("revision", "0");
     this.setMeta("githubStatus", "synced");
     this.setMeta("githubMessage", "");
@@ -147,6 +139,48 @@ export class VaultRoom extends DurableObject<Env> {
   private async stableFileId(repository: string, path: string): Promise<string> {
     const bytes = await crypto.subtle.digest("SHA-256", encoder.encode(`${repository}\0${path}`));
     return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, "0")).join("").slice(0, 32);
+  }
+
+  private async listDirectory(path: string): Promise<Response> {
+    if (path && !validPath(path)) return json({ error: "invalid_path" }, { status: 400 });
+    const directory = this.ctx.storage.sql.exec<DirectoryRow>("SELECT path,tree_sha,loaded FROM directories WHERE path = ?", path).toArray()[0];
+    if (!directory) return json({ error: "directory_not_found" }, { status: 404 });
+    if (!directory.loaded) {
+      const repository = this.getMeta("repository");
+      if (!repository) return json({ error: "workspace_not_initialized" }, { status: 409 });
+      const [owner, repo] = repository.split("/");
+      const tree = await (await this.github(await this.token(), "/repos/" + owner + "/" + repo + "/git/trees/" + directory.tree_sha)).json() as TreeResponse;
+      if (tree.truncated) return json({ error: "directory_too_large" }, { status: 413 });
+      for (const entry of tree.tree) {
+        if (!validPath(entry.path)) continue;
+        const entryPath = path ? `${path}/${entry.path}` : entry.path;
+        if (entry.type === "tree") {
+          const folderId = `folder-${entryPath}`;
+          this.ctx.storage.sql.exec(
+            "INSERT INTO files (file_id,path,kind,revision,deleted,dirty) VALUES (?,?,'folder',0,0,0) ON CONFLICT(file_id) DO UPDATE SET path=excluded.path,deleted=0",
+            folderId, entryPath
+          );
+          this.ctx.storage.sql.exec("INSERT OR IGNORE INTO directories (path,tree_sha,loaded) VALUES (?,?,0)", entryPath, entry.sha);
+          continue;
+        }
+        if (entry.type !== "blob" || !["100644", "100755", "120000"].includes(entry.mode)) continue;
+        const size = entry.size ?? 0;
+        const fileId = await this.stableFileId(repository, entryPath);
+        this.ctx.storage.sql.exec(
+          "INSERT INTO files (file_id,path,kind,content,object_key,size,sha,revision,deleted,dirty) VALUES (?,?,?,NULL,NULL,?,?,0,0,0) ON CONFLICT(file_id) DO UPDATE SET path=excluded.path,kind=excluded.kind,size=excluded.size,sha=excluded.sha,deleted=0 WHERE files.dirty=0",
+          fileId, entryPath, isMarkdown(entryPath) ? "markdown" : "asset", size, entry.sha
+        );
+      }
+      this.ctx.storage.sql.exec("UPDATE directories SET loaded=1 WHERE path=?", path);
+      console.log(JSON.stringify({ event: "directory.list.completed", source: "github", itemCount: tree.tree.length }));
+    } else {
+      console.log(JSON.stringify({ event: "directory.list.completed", source: "cache" }));
+    }
+    const files = this.files().filter((file) => parentDirectory(file.path) === path).map((file) => ({
+      id: file.file_id, path: file.path, kind: file.kind, revision: file.revision,
+      ...(file.kind !== "folder" ? { size: file.size, ...(file.kind === "asset" ? { contentType: "application/octet-stream" } : {}) } : {}),
+    }));
+    return json({ path, files, cached: true });
   }
 
   private saveDocument(fileId: string, update: Uint8Array): void {
@@ -183,6 +217,7 @@ export class VaultRoom extends DurableObject<Env> {
       if (url.pathname === "/initialize" && request.method === "POST") return this.initialize(await request.json() as { repository: string; branch: string; accountLogin: string });
       if (!this.getMeta("repository")) return json({ error: "workspace_not_initialized" }, { status: 409 });
       if (url.pathname === "/snapshot" && request.method === "GET") return this.snapshot(url);
+      if (url.pathname === "/directory" && request.method === "GET") return this.listDirectory(url.searchParams.get("path") ?? "");
       if (url.pathname === "/sync-status" && request.method === "GET") return json(await this.syncStatus());
       if (url.pathname === "/flush" && request.method === "POST") {
         await this.ctx.storage.deleteAlarm();
@@ -207,10 +242,10 @@ export class VaultRoom extends DurableObject<Env> {
       if (url.pathname === "/initialize") {
         this.setMeta("githubStatus", "failed");
         this.setMeta("githubMessage", "Repository import failed. Retry the connection.");
-        console.error(JSON.stringify({ event: "github_import_failed", errorType: error instanceof Error ? error.name : "unknown" }));
+        console.error(JSON.stringify({ event: "github_import_failed", errorType: error instanceof Error ? error.name : "unknown", ...(error instanceof GitHubRequestError ? { upstreamStatus: error.status } : {}) }));
         return json({ error: "github_import_failed", message: "Repository import failed. Retry the connection." }, { status: 502 });
       }
-      console.error(JSON.stringify({ event: "worker_internal_error", errorType: error instanceof Error ? error.name : "unknown" }));
+      console.error(JSON.stringify({ event: url.pathname === "/directory" ? "directory.list.failed" : "worker_internal_error", errorType: error instanceof Error ? error.name : "unknown", ...(error instanceof GitHubRequestError ? { upstreamStatus: error.status } : {}) }));
       return json({ error: "internal_error", message: "The request could not be completed." }, { status: 500 });
     }
   }
@@ -312,6 +347,7 @@ export class VaultRoom extends DurableObject<Env> {
       const content = kind === "markdown" ? String(operation.content ?? "") : null;
       this.ensureParents(path);
       this.ctx.storage.sql.exec("INSERT INTO files (file_id,path,kind,content,revision,deleted,dirty) VALUES (?,?,?,?,0,0,1)", fileId, path, kind, content);
+      if (kind === "folder") this.ctx.storage.sql.exec("INSERT OR IGNORE INTO directories (path,tree_sha,loaded) VALUES (?, '', 1)", path);
       if (kind === "markdown") {
         const doc = new Y.Doc({ guid: fileId });
         if (content) doc.getText("markdown").insert(0, content);
@@ -346,6 +382,12 @@ export class VaultRoom extends DurableObject<Env> {
           "UPDATE files SET path = ? || substr(path, length(?) + 1), revision = ?, dirty = 0 WHERE kind = 'folder' AND (path = ? OR substr(path, 1, length(?) + 1) = ? || '/')",
           destination, file.path, revision, file.path, file.path, file.path
         );
+        const cachedDirectories = this.ctx.storage.sql.exec<DirectoryRow>("SELECT path,tree_sha,loaded FROM directories WHERE path = ? OR substr(path,1,length(?) + 1) = ? || '/'", file.path, file.path, file.path).toArray();
+        for (const directory of cachedDirectories) this.ctx.storage.sql.exec("DELETE FROM directories WHERE path=?", directory.path);
+        for (const directory of cachedDirectories) {
+          const movedPath = destination + directory.path.slice(file.path.length);
+          this.ctx.storage.sql.exec("INSERT OR REPLACE INTO directories (path,tree_sha,loaded) VALUES (?,?,?)", movedPath, directory.tree_sha, directory.loaded);
+        }
       }
     } else if (operation.type === "delete") {
       const file = this.file(String(operation.fileId ?? ""));
@@ -354,6 +396,7 @@ export class VaultRoom extends DurableObject<Env> {
       const prefix = file.kind === "folder" ? `${file.path}/` : "";
       if (file.kind === "folder") {
         this.ctx.storage.sql.exec("UPDATE files SET deleted = 1, dirty = CASE WHEN kind = 'folder' THEN 0 ELSE 1 END, revision = ? WHERE path = ? OR substr(path, 1, length(?) + 1) = ? || '/'", revision, file.path, file.path, file.path);
+        this.ctx.storage.sql.exec("DELETE FROM directories WHERE path = ? OR substr(path,1,length(?) + 1) = ? || '/'", file.path, file.path, file.path);
       }
       else this.ctx.storage.sql.exec("UPDATE files SET deleted = 1, dirty = 1, revision = ? WHERE file_id = ?", revision, file.file_id);
     } else {
@@ -381,6 +424,7 @@ export class VaultRoom extends DurableObject<Env> {
       if (this.pathExists(parent)) continue;
       const fileId = `folder-${parent}`;
       this.ctx.storage.sql.exec("INSERT INTO files (file_id,path,kind,revision,deleted,dirty) VALUES (?,?, 'folder',0,0,?) ON CONFLICT(file_id) DO UPDATE SET path = excluded.path, deleted = 0, dirty = excluded.dirty", fileId, parent, dirty ? 1 : 0);
+      if (dirty) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO directories (path,tree_sha,loaded) VALUES (?, '', 1)", parent);
     }
   }
 

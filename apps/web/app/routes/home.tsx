@@ -62,6 +62,7 @@ export default function Home() {
   const [activeWorkspace, setActiveWorkspace] = useState<Workspace | null>(null);
   const [currentFolder, setCurrentFolder] = useState("");
   const [files, setFiles] = useState<FileRecord[]>([]);
+  const [loadingFolder, setLoadingFolder] = useState(false);
   const [activeFile, setActiveFile] = useState<FileRecord | null>(null);
   const [text, setText] = useState("");
   const [sync, setSync] = useState<SyncStatus>({ githubStatus: "pending", pendingFiles: 0 });
@@ -229,12 +230,15 @@ export default function Home() {
     connect();
     const loadSnapshot = async () => {
       try {
-        const result = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`);
+        setLoadingFolder(true);
+        const result = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/directory`);
         if (!alive) return;
         setFiles(result.files);
+        setCurrentFolder("");
+        setLoadingFolder(false);
         const state = await api<SyncStatus>(`/api/workspaces/${activeWorkspace.id}/sync-status`);
         if (alive) setSync(state);
-      } catch (cause) { if (alive) setError(cause instanceof Error ? cause.message : "Could not load workspace"); }
+      } catch (cause) { if (alive) { setLoadingFolder(false); setError(cause instanceof Error ? cause.message : "Could not load workspace"); } }
     };
     void loadSnapshot();
     const timer = window.setInterval(() => {
@@ -323,6 +327,18 @@ export default function Home() {
     hydrating.current = false;
   }, [activeWorkspace?.id, api]);
   openFileRef.current = openFile;
+
+  const openFolder = async (file: FileRecord) => {
+    if (!activeWorkspace) return;
+    clearActiveFile();
+    setCurrentFolder(file.path);
+    setLoadingFolder(true);
+    try {
+      const result = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/directory?path=${encodeURIComponent(file.path)}`);
+      setFiles((current) => [...current.filter((entry) => parentPath(entry.path) !== file.path), ...result.files]);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not open folder"); }
+    finally { setLoadingFolder(false); }
+  };
 
   const chooseWorkspace = (workspace: Workspace) => {
     setActiveWorkspace(workspace); clearActiveFile(); setCurrentFolder("");
@@ -488,8 +504,8 @@ export default function Home() {
           </div></div>
           <nav className="file-list" aria-label="Files">
             {currentFolder && <button className="folder-row" onClick={() => setCurrentFolder(parentFolder)}><span className="folder-icon">↰</span>..</button>}
-            {visibleFiles.map((file) => file.kind === "folder" ? <button className="folder-row" key={file.id} onClick={() => { clearActiveFile(); setCurrentFolder(file.path); }}><span className="folder-icon">▸</span>{entryName(file.path)}</button> : <button key={file.id} className={`file-row ${activeFile?.id === file.id ? "selected" : ""}`} onClick={() => void openFile(file)}><span className="file-icon">{file.kind === "markdown" ? "▤" : "◇"}</span><span>{entryName(file.path)}</span></button>)}
-            {!visibleFiles.length && <p className="empty-hint">Empty</p>}
+            {visibleFiles.map((file) => file.kind === "folder" ? <button className="folder-row" key={file.id} onClick={() => void openFolder(file)}><span className="folder-icon">▸</span>{entryName(file.path)}</button> : <button key={file.id} className={`file-row ${activeFile?.id === file.id ? "selected" : ""}`} onClick={() => void openFile(file)}><span className="file-icon">{file.kind === "markdown" ? "▤" : "◇"}</span><span>{entryName(file.path)}</span></button>)}
+            {!visibleFiles.length && <p className="empty-hint">{loadingFolder ? "Loading…" : "Empty"}</p>}
           </nav>
         </>}
         <div className="sidebar-bottom">
