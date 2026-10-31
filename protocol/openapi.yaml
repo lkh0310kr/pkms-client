@@ -42,6 +42,39 @@ paths:
       responses:
         '302':
           description: Establishes a secure session and redirects to the application.
+  /api/auth/device/start:
+    post:
+      operationId: startGitHubDeviceLogin
+      security: []
+      responses:
+        '200':
+          description: GitHub Device Flow instructions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device_code, user_code, verification_uri, expires_in, interval]
+                properties:
+                  device_code: { type: string }
+                  user_code: { type: string }
+                  verification_uri: { type: string, format: uri }
+                  expires_in: { type: integer }
+                  interval: { type: integer }
+  /api/auth/device/poll:
+    post:
+      operationId: pollGitHubDeviceLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceCode]
+              properties: { deviceCode: { type: string } }
+      responses:
+        '200': { description: Device login completed and returned a signed PKMS token. }
+        '202': { description: User authorization is still pending. }
   /api/logout:
     post:
       operationId: logout
@@ -91,10 +124,13 @@ paths:
                 branch: { type: string }
       responses:
         '201':
-          description: Workspace connected and initial tree scheduled for import.
+          description: Workspace connected and initial repository tree imported.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Workspace' }
+              schema:
+                type: object
+                required: [workspace]
+                properties: { workspace: { $ref: '#/components/schemas/Workspace' } }
   /api/workspaces/{workspaceId}/snapshot:
     parameters:
       - $ref: '#/components/parameters/WorkspaceId'
@@ -127,6 +163,40 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/FileRecord' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/workspaces/{workspaceId}/assets/{fileId}:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+      - in: path
+        name: fileId
+        required: true
+        schema: { type: string }
+    get:
+      operationId: downloadAsset
+      responses:
+        '200':
+          description: Authenticated attachment bytes.
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/workspaces/{workspaceId}/upload:
+    parameters:
+      - $ref: '#/components/parameters/WorkspaceId'
+    post:
+      operationId: uploadAsset
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [path, file]
+              properties:
+                path: { type: string }
+                clientId: { type: string }
+                file: { type: string, format: binary }
+      responses:
+        '201': { description: Attachment stored and queued for GitHub commit. }
+        '413': { description: Upload exceeds the 50 MiB limit. }
   /api/workspaces/{workspaceId}/operations:
     parameters:
       - $ref: '#/components/parameters/WorkspaceId'
@@ -232,11 +302,12 @@ components:
         avatarUrl: { type: string, format: uri }
     Repository:
       type: object
-      required: [fullName, defaultBranch, private]
+      required: [fullName, defaultBranch, private, canWrite]
       properties:
         fullName: { type: string }
         defaultBranch: { type: string }
         private: { type: boolean }
+        canWrite: { type: boolean }
     Workspace:
       type: object
       required: [id, repository, branch, revision, githubStatus]
@@ -271,10 +342,11 @@ components:
         nextRevision: { type: integer, minimum: 0 }
     OperationRequest:
       type: object
-      required: [operationId, baseRevision, operation]
+      required: [operationId, baseRevision, clientId, operation]
       properties:
         operationId: { type: string, format: uuid }
         baseRevision: { type: integer, minimum: 0 }
+        clientId: { type: string }
         operation:
           oneOf:
             - type: object
@@ -302,10 +374,9 @@ components:
                 fileId: { type: string }
     DocumentUpdateRequest:
       type: object
-      required: [operationId, protocolVersion, update]
+      required: [operationId, update]
       properties:
         operationId: { type: string, format: uuid }
-        protocolVersion: { type: integer, const: 1 }
         update: { type: string, contentEncoding: base64 }
     OperationResponse:
       type: object
@@ -323,7 +394,7 @@ components:
         githubStatus: { type: string, enum: [synced, pending, failed, external-change] }
         githubHead: { type: string }
         lastGitHubCommitAt: { type: string, format: date-time }
-        nextGitHubFlushAt: { type: string, format: date-time }
+        nextGitHubFlushAt: { type: integer, description: Unix epoch milliseconds. }
         pendingFiles: { type: integer, minimum: 0 }
         message: { type: string }
     ApiError:

@@ -17,3 +17,6 @@ apps/web/.react-router/
 target/
 *.xcframework
 apps/ios/.build/
+.dev.vars
+.dev.vars.*
+!apps/web/.dev.vars.example

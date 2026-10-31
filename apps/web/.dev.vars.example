@@ -1,0 +1,4 @@
+GITHUB_CLIENT_ID=your-github-app-client-id
+GITHUB_CLIENT_SECRET=your-github-app-client-secret
+SESSION_SECRET=replace-with-at-least-32-random-bytes
+DATA_ENCRYPTION_KEY=base64-encoded-32-byte-key

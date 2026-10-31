@@ -1,6 +1,7 @@
 {
   "name": "pkms-client",
   "private": true,
+  "engines": { "node": ">=22.22.0" },
   "workspaces": ["apps/web"],
   "scripts": {
     "dev": "npm run dev -w @pkms/web",
