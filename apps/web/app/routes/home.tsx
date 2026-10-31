@@ -113,7 +113,7 @@ export default function Home() {
   const activeRef = useRef<{ file: FileRecord | null; doc: Y.Doc | null; text: Y.Text | null; value: string }>({ file: null, doc: null, text: null, value: "" });
   const pending = useRef(new Map<string, RealtimeMessage>());
   const hydrating = useRef(false);
-  const autoSaveTimer = useRef<number | null>(null);
+  const autoSaveTimers = useRef(new Map<string, number>());
 
   const clearActiveFile = () => {
     const current = activeRef.current;
@@ -150,29 +150,38 @@ export default function Home() {
         body: JSON.stringify({ operationId: id(), fileId, update: toBase64(Y.encodeStateAsUpdate(doc)) }),
       });
       const status = await api<SyncStatus>(`/api/workspaces/${workspaceId}/flush`, { method: "POST" });
-      setSync(status);
-      if (status.githubStatus === "synced") setNotice("Saved to GitHub");
-      else if (status.githubStatus === "external-change") setError(status.message ?? "GitHub changed outside PKMS.");
-      else setNotice("Saved locally");
+      if (activeRef.current.file?.id === fileId && activeWorkspace?.id === workspaceId) {
+        setSync(status);
+        if (status.githubStatus === "synced") setNotice("Saved to GitHub");
+        else if (status.githubStatus === "external-change") setError(status.message ?? "GitHub changed outside PKMS.");
+        else setNotice("Saved locally");
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save to GitHub");
     } finally { setSaving(false); }
   }, [activeWorkspace?.id, api]);
 
   const scheduleAutoSave = useCallback((fileId: string, doc: Y.Doc) => {
+    const workspaceId = activeWorkspace?.id;
+    if (!workspaceId) return;
+    const key = `${workspaceId}:${fileId}`;
     setNotice("Unsaved");
-    if (autoSaveTimer.current !== null) window.clearTimeout(autoSaveTimer.current);
-    autoSaveTimer.current = window.setTimeout(() => {
-      autoSaveTimer.current = null;
+    const previous = autoSaveTimers.current.get(key);
+    if (previous !== undefined) window.clearTimeout(previous);
+    const timer = window.setTimeout(() => {
+      autoSaveTimers.current.delete(key);
       void saveMarkdownToGitHub(fileId, doc);
     }, 5_000);
+    autoSaveTimers.current.set(key, timer);
   }, [saveMarkdownToGitHub]);
 
   const saveActiveFileNow = useCallback(() => {
     const current = activeRef.current;
     if (!current.file || current.file.kind !== "markdown" || !current.doc) return;
-    if (autoSaveTimer.current !== null) window.clearTimeout(autoSaveTimer.current);
-    autoSaveTimer.current = null;
+    const key = `${activeWorkspace?.id}:${current.file.id}`;
+    const timer = autoSaveTimers.current.get(key);
+    if (timer !== undefined) window.clearTimeout(timer);
+    autoSaveTimers.current.delete(key);
     void saveMarkdownToGitHub(current.file.id, current.doc);
   }, [saveMarkdownToGitHub]);
 
