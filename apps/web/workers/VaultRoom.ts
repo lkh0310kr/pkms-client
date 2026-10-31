@@ -92,8 +92,7 @@ export class VaultRoom extends DurableObject<Env> {
     headers.set("User-Agent", "PKMS-Cloud/1.0");
     const response = await fetch(`https://api.github.com${path}`, { ...init, headers });
     if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`GitHub API ${response.status}: ${detail.slice(0, 500)}`);
+      throw new Error(`GitHub API request failed with status ${response.status}`);
     }
     return response;
   }
@@ -126,8 +125,10 @@ export class VaultRoom extends DurableObject<Env> {
       for (const entry of tree.tree) {
         if (entry.type !== "blob" || !["100644", "100755"].includes(entry.mode)) continue;
         if (!validPath(entry.path)) continue;
-        if ((entry.size ?? 0) > MAX_GIT_FILE_BYTES) throw new Error(`${entry.path} exceeds the PKMS 50 MiB file limit.`);
-        if (isMarkdown(entry.path) && (entry.size ?? 0) > MAX_MARKDOWN_BYTES) throw new Error(`${entry.path} exceeds the PKMS 512 KiB Markdown limit.`);
+        const size = entry.size;
+        if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) throw new Error("GitHub did not provide a valid repository file size.");
+        if (size > MAX_GIT_FILE_BYTES) throw new Error("A repository file exceeds the PKMS 50 MiB file limit.");
+        if (isMarkdown(entry.path) && size > MAX_MARKDOWN_BYTES) throw new Error("A Markdown file exceeds the PKMS 512 KiB file limit.");
         const fileId = await this.stableFileId(body.repository, entry.path);
         this.ensureParents(entry.path, false);
         const markdown = isMarkdown(entry.path);
@@ -136,6 +137,7 @@ export class VaultRoom extends DurableObject<Env> {
         if (markdown) {
           const response = await this.github(token, `/repos/${owner}/${repo}/git/blobs/${entry.sha}`, { headers: { Accept: "application/vnd.github.raw+json" } });
           const raw = await response.arrayBuffer();
+          if (raw.byteLength !== size) throw new Error("GitHub returned a file with an unexpected size.");
           content = new TextDecoder("utf-8", { fatal: true }).decode(raw);
           const doc = new Y.Doc({ guid: fileId });
           doc.getText("markdown").insert(0, content);
@@ -143,8 +145,16 @@ export class VaultRoom extends DurableObject<Env> {
         } else {
           objectKey = `${this.ctx.id.toString()}/${fileId}`;
           const response = await this.github(token, `/repos/${owner}/${repo}/git/blobs/${entry.sha}`, { headers: { Accept: "application/vnd.github.raw+json" } });
-          const raw = response.body ?? await response.arrayBuffer();
-          await this.env.ASSET_BUCKET.put(objectKey, raw);
+          if (!response.body) {
+            const raw = await response.arrayBuffer();
+            if (raw.byteLength !== size) throw new Error("GitHub returned a file with an unexpected size.");
+            await this.env.ASSET_BUCKET.put(objectKey, raw);
+          } else {
+            const fixed = new FixedLengthStream(size);
+            const upload = this.env.ASSET_BUCKET.put(objectKey, fixed.readable);
+            const transfer = response.body.pipeTo(fixed.writable);
+            await Promise.all([upload, transfer]);
+          }
         }
         this.ctx.storage.sql.exec(
           "INSERT OR IGNORE INTO files (file_id,path,kind,content,object_key,size,sha,revision,deleted,dirty) VALUES (?,?,?,?,?,?,?,?,0,0)",
