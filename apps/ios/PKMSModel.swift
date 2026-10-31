@@ -1,0 +1,565 @@
+import Foundation
+import Observation
+import UniformTypeIdentifiers
+
+struct PKMSUser: Codable, Hashable {
+    let login: String
+    let avatarUrl: URL?
+}
+
+struct PKMSPeer: Decodable, Identifiable, Hashable {
+    let clientId: String
+    let login: String
+    let avatarUrl: URL?
+    var id: String { clientId }
+}
+private struct PKMSPeerList: Decodable { let peers: [PKMSPeer] }
+
+struct PKMSRepository: Decodable, Identifiable, Hashable {
+    let fullName: String
+    let defaultBranch: String
+    let `private`: Bool
+    let canWrite: Bool
+    var id: String { fullName }
+}
+
+struct PKMSWorkspace: Codable, Identifiable, Hashable {
+    let id: String
+    let repository: String
+    let branch: String
+    var revision: Int
+    var githubStatus: String
+    var message: String?
+}
+
+struct PKMSFile: Decodable, Identifiable, Hashable {
+    let id: String
+    let path: String
+    let kind: String
+    let content: String?
+    let size: Int?
+    var isMarkdown: Bool { kind == "markdown" }
+}
+
+struct PKMSSnapshot: Decodable {
+    let workspaceId: String
+    let revision: Int
+    let files: [PKMSFile]
+}
+
+struct PKMSSyncStatus: Decodable {
+    let serverRevision: Int
+    let githubStatus: String
+    let githubHead: String?
+    let lastGitHubCommitAt: Date?
+    let nextGitHubFlushAt: Double?
+    let pendingFiles: Int
+    let message: String?
+}
+
+struct PKMSSessionResponse: Decodable { let user: PKMSUser? }
+struct PKMSWorkspaceList: Decodable { let workspaces: [PKMSWorkspace] }
+struct PKMSRepositoryList: Decodable { let repositories: [PKMSRepository] }
+struct PKMSConnectedWorkspace: Decodable { let workspace: PKMSWorkspace }
+struct PKMSDeviceStart: Decodable {
+    let device_code: String
+    let user_code: String
+    let verification_uri: URL
+    let expires_in: Int
+    let interval: Int
+
+    enum CodingKeys: String, CodingKey {
+        case device_code, user_code, verification_uri, expires_in, interval
+    }
+}
+struct PKMSDevicePoll: Decodable {
+    let pending: Bool
+    let interval: Int?
+    let token: String?
+    let user: PKMSUser?
+}
+struct PKMSFileUpdate: Decodable { let update: String }
+struct PKMSOperationResponse: Decodable { let acceptedRevision: Int; let conflictCopyPath: String? }
+
+struct PKMSOperationRequest: Encodable {
+    let operationId: String
+    let baseRevision: Int
+    let clientId: String
+    let operation: Operation
+
+    struct Operation: Encodable {
+        let type: String
+        var path: String?
+        var fileId: String?
+        var content: String?
+        var toPath: String?
+    }
+}
+
+struct PKMSDocumentUpdate: Encodable {
+    let type = "document-update"
+    let operationId: String
+    let fileId: String
+    let update: String
+}
+
+struct PKMSHello: Encodable {
+    let type = "hello"
+    let protocolVersion = 1
+    let clientId: String
+    let afterRevision: Int
+    let user: PKMSUser?
+    let fileId: String?
+}
+
+enum PKMSClientError: LocalizedError {
+    case invalidServerURL
+    case unauthorized
+    case http(Int, String)
+    case malformedResponse
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidServerURL: "Enter a valid PKMS server URL."
+        case .unauthorized: "Sign in with GitHub to continue."
+        case .http(let code, let message): "Server error \(code): \(message)"
+        case .malformedResponse: "The PKMS server returned an invalid response."
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class PKMSModel {
+    var serverAddress: String {
+        didSet { UserDefaults.standard.set(serverAddress, forKey: "pkms.serverAddress") }
+    }
+    private(set) var user: PKMSUser?
+    private(set) var workspaces: [PKMSWorkspace] = []
+    private(set) var repositories: [PKMSRepository] = []
+    private(set) var files: [PKMSFile] = []
+    private(set) var activeWorkspace: PKMSWorkspace?
+    private(set) var activeFile: PKMSFile?
+    private(set) var markdown = ""
+    private(set) var githubStatus = "synced"
+    private(set) var pendingFiles = 0
+    private(set) var statusMessage = ""
+    private(set) var errorMessage: String?
+    private(set) var deviceCode: String?
+    private(set) var verificationURL: URL?
+    private(set) var isLoading = false
+    private(set) var previewURL: URL?
+    private(set) var collaborators: [PKMSPeer] = []
+
+    private var token: String?
+    private var document: NativeMarkdownDocument?
+    private var socket: URLSessionWebSocketTask?
+    private var socketTask: Task<Void, Never>?
+    private var socketSendTask: Task<Void, Never>?
+    private var deviceTask: Task<Void, Never>?
+    private var cacheTask: Task<Void, Never>?
+    private var clientID = "ios-\(UUID().uuidString.lowercased())"
+
+    init() {
+        serverAddress = UserDefaults.standard.string(forKey: "pkms.serverAddress") ?? "http://localhost:5173"
+        token = SessionVault.read(for: serverAddress)
+    }
+
+    func restoreSession() async {
+        guard token != nil else { return }
+        do {
+            let session = try await get("/api/session", as: PKMSSessionResponse.self)
+            user = session.user
+            if user != nil { await loadWorkspaces() } else { await signOut() }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func beginSignIn() async {
+        errorMessage = nil
+        do {
+            let result = try await post("/api/auth/device/start", body: EmptyBody(), as: PKMSDeviceStart.self, authenticated: false)
+            deviceCode = result.user_code
+            verificationURL = result.verification_uri
+            deviceTask?.cancel()
+            deviceTask = Task { await pollDeviceCode(result) }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    private func pollDeviceCode(_ flow: PKMSDeviceStart) async {
+        let deadline = Date.now.addingTimeInterval(TimeInterval(flow.expires_in))
+        var delay = max(flow.interval, 5)
+        while !Task.isCancelled && Date.now < deadline {
+            do {
+                try await Task.sleep(for: .seconds(delay))
+                var request = try makeRequest("/api/auth/device/poll", method: "POST", authenticated: false)
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONEncoder().encode(DevicePollBody(deviceCode: flow.device_code))
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw PKMSClientError.malformedResponse }
+                if http.statusCode == 202 {
+                    let pending = try JSONDecoder().decode(PKMSDevicePoll.self, from: data)
+                    delay = max(pending.interval ?? flow.interval, 5)
+                    continue
+                }
+                guard (200..<300).contains(http.statusCode) else { throw decodeServerError(data, status: http.statusCode) }
+                let result = try JSONDecoder().decode(PKMSDevicePoll.self, from: data)
+                guard let issued = result.token, let signedInUser = result.user else { throw PKMSClientError.malformedResponse }
+                token = issued
+                user = signedInUser
+                SessionVault.write(issued, for: serverAddress)
+                deviceCode = nil
+                verificationURL = nil
+                await loadWorkspaces()
+                return
+            } catch is CancellationError { return }
+            catch { errorMessage = error.localizedDescription; return }
+        }
+        deviceCode = nil
+        verificationURL = nil
+        errorMessage = "GitHub device code expired. Please sign in again."
+    }
+
+    func signOut() async {
+        socket?.cancel(with: .goingAway, reason: nil)
+        socketTask?.cancel(); socketSendTask?.cancel(); deviceTask?.cancel()
+        token = nil; user = nil; activeWorkspace = nil; activeFile = nil; document = nil
+        workspaces = []; files = []; markdown = ""
+        SessionVault.clear(for: serverAddress)
+    }
+
+    func loadWorkspaces() async {
+        do {
+            let result = try await get("/api/workspaces", as: PKMSWorkspaceList.self)
+            workspaces = result.workspaces
+            if let existing = activeWorkspace, let match = workspaces.first(where: { $0.id == existing.id }) {
+                activeWorkspace = match
+            } else if let first = workspaces.first {
+                await selectWorkspace(first)
+            }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func loadRepositories() async {
+        do {
+            repositories = try await get("/api/repositories", as: PKMSRepositoryList.self).repositories.filter(\.canWrite)
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func connect(_ repository: PKMSRepository) async {
+        do {
+            let result = try await post("/api/workspaces", body: ConnectBody(repository: repository.fullName, branch: repository.defaultBranch), as: PKMSConnectedWorkspace.self)
+            await loadWorkspaces()
+            await selectWorkspace(result.workspace)
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func selectWorkspace(_ workspace: PKMSWorkspace) async {
+        socket?.cancel(with: .goingAway, reason: nil)
+        socketTask?.cancel()
+        activeWorkspace = workspace
+        activeFile = nil; document = nil; markdown = ""; files = []
+        collaborators = []
+        do {
+            let snapshot = try await get("/api/workspaces/\(workspace.id)/snapshot", as: PKMSSnapshot.self)
+            files = snapshot.files
+            await refreshSyncStatus()
+            connectSocket(workspace)
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func open(_ file: PKMSFile) async {
+        dismissPreview()
+        activeFile = file
+        if let socket, socket.state == .running, let encoded = try? JSONSerialization.data(withJSONObject: ["type": "presence", "fileId": file.id]), let text = String(data: encoded, encoding: .utf8) { Task { try? await socket.send(.string(text)) } }
+        guard let workspace = activeWorkspace else { document = nil; markdown = ""; return }
+        guard file.isMarkdown else {
+            document = nil; markdown = ""
+            await preview(file, workspace: workspace)
+            return
+        }
+        let doc = NativeMarkdownDocument()
+        document = doc
+        let local = cacheURL(workspaceID: workspace.id, fileID: file.id)
+        if let data = try? Data(contentsOf: local) { _ = doc.apply(data) }
+        markdown = doc.text
+        do {
+            let vector = doc.stateVector.base64EncodedString()
+            var components = URLComponents(url: endpoint("/api/workspaces/\(workspace.id)/files/\(file.id)/updates"), resolvingAgainstBaseURL: false)
+            components?.queryItems = [URLQueryItem(name: "stateVector", value: vector)]
+            guard let url = components?.url else { throw PKMSClientError.invalidServerURL }
+            let update = try await get(url, as: PKMSFileUpdate.self)
+            if let bytes = Data(base64Encoded: update.update) { _ = doc.apply(bytes) }
+            markdown = doc.text
+            saveCache(doc, workspaceID: workspace.id, fileID: file.id)
+            if socket?.state == .running { sendFullState(doc, fileID: file.id) }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func editMarkdown(_ value: String) {
+        guard let doc = document else { markdown = value; return }
+        let previous = doc.text as NSString
+        let next = value as NSString
+        guard previous != next else { return }
+        var prefix = 0
+        while prefix < min(previous.length, next.length), previous.character(at: prefix) == next.character(at: prefix) { prefix += 1 }
+        var suffix = 0
+        while suffix < previous.length - prefix, suffix < next.length - prefix,
+              previous.character(at: previous.length - suffix - 1) == next.character(at: next.length - suffix - 1) { suffix += 1 }
+        let removed = previous.length - prefix - suffix
+        let insertedRange = NSRange(location: prefix, length: next.length - prefix - suffix)
+        let inserted = next.substring(with: insertedRange)
+        if removed > 0 {
+            let update = doc.delete(utf16Index: UInt32(prefix), length: UInt32(removed))
+            send(update, fileID: activeFile?.id)
+        }
+        if !inserted.isEmpty {
+            let update = doc.insert(utf16Index: UInt32(prefix), text: inserted)
+            send(update, fileID: activeFile?.id)
+        }
+        markdown = doc.text
+        if let workspace = activeWorkspace, let file = activeFile { scheduleCache(doc, workspaceID: workspace.id, fileID: file.id) }
+    }
+
+    func createNote() async {
+        guard let workspace = activeWorkspace else { return }
+        let filename = "Untitled-\(Int(Date.now.timeIntervalSince1970)).md"
+        let body = PKMSOperationRequest(operationId: UUID().uuidString, baseRevision: workspace.revision, clientId: clientID,
+            operation: .init(type: "create-file", path: filename, fileId: UUID().uuidString, content: "# Untitled\n\n"))
+        do {
+            let result = try await post("/api/workspaces/\(workspace.id)/operations", body: body, as: PKMSOperationResponse.self)
+            await reloadFiles()
+            if let file = files.first(where: { $0.path == (result.conflictCopyPath ?? filename) }) { await open(file) }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func createFolder() async {
+        guard let workspace = activeWorkspace else { return }
+        let body = PKMSOperationRequest(operationId: UUID().uuidString, baseRevision: workspace.revision, clientId: clientID,
+            operation: .init(type: "create-folder", path: "New Folder"))
+        do { _ = try await post("/api/workspaces/\(workspace.id)/operations", body: body, as: PKMSOperationResponse.self); await reloadFiles() }
+        catch { errorMessage = error.localizedDescription }
+    }
+
+    func upload(_ fileURL: URL) async {
+        guard let workspace = activeWorkspace else { return }
+        let scoped = fileURL.startAccessingSecurityScopedResource()
+        defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let boundary = "PKMS-\(UUID().uuidString)"
+            var body = Data()
+            func append(_ value: String) { body.append(Data(value.utf8)) }
+            append("--\(boundary)\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n\(fileURL.lastPathComponent)\r\n")
+            append("--\(boundary)\r\nContent-Disposition: form-data; name=\"clientId\"\r\n\r\n\(clientID)\r\n")
+            let safeFilename = fileURL.lastPathComponent.replacingOccurrences(of: "\"", with: "")
+            let contentType = UTType(filenameExtension: fileURL.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+            append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(safeFilename)\"\r\nContent-Type: \(contentType)\r\n\r\n")
+            body.append(data)
+            append("\r\n--\(boundary)--\r\n")
+            var request = try makeRequest("/api/workspaces/\(workspace.id)/upload", method: "POST", authenticated: true)
+            request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+            let (responseData, response) = try await URLSession.shared.data(for: request)
+            try check(response, data: responseData)
+            await reloadFiles()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    private func preview(_ file: PKMSFile, workspace: PKMSWorkspace) async {
+        do {
+            var request = try makeRequest("/api/workspaces/\(workspace.id)/assets/\(file.id)", method: "GET", authenticated: true)
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try check(response, data: data)
+            let name = String(file.path.split(separator: "/").last ?? "file")
+            let url = FileManager.default.temporaryDirectory.appending(path: "PKMS-\(UUID().uuidString)-\(name)")
+            try data.write(to: url, options: .atomic)
+            previewURL = url
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func dismissPreview() {
+        if let previewURL { try? FileManager.default.removeItem(at: previewURL) }
+        previewURL = nil
+    }
+
+    func refreshSyncStatus() async {
+        guard let workspace = activeWorkspace else { return }
+        do {
+            let status = try await get("/api/workspaces/\(workspace.id)/sync-status", as: PKMSSyncStatus.self)
+            githubStatus = status.githubStatus
+            pendingFiles = status.pendingFiles
+            statusMessage = status.message ?? ""
+        } catch { }
+    }
+
+    func dismissError() { errorMessage = nil }
+
+    func reloadFiles() async {
+        guard let workspace = activeWorkspace else { return }
+        do { files = try await get("/api/workspaces/\(workspace.id)/snapshot", as: PKMSSnapshot.self).files }
+        catch { errorMessage = error.localizedDescription }
+    }
+
+    private func connectSocket(_ workspace: PKMSWorkspace) {
+        guard let token, var components = URLComponents(string: serverAddress) else { return }
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        components.path = "/api/workspaces/\(workspace.id)/stream"
+        components.queryItems = [URLQueryItem(name: "clientId", value: clientID)]
+        guard let url = components.url else { return }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        socketTask = Task { [weak self] in
+            guard let self else { return }
+            var delay: UInt64 = 1_000_000_000
+            while !Task.isCancelled {
+                let task = URLSession.shared.webSocketTask(with: request)
+                socket = task
+                task.resume()
+                do {
+                    let hello = PKMSHello(clientId: clientID, afterRevision: workspace.revision, user: user, fileId: activeFile?.id)
+                    try await task.send(.string(String(data: JSONEncoder().encode(hello), encoding: .utf8)!))
+                    if let file = activeFile, let document { sendFullState(document, fileID: file.id) }
+                    while !Task.isCancelled {
+                        let message = try await task.receive()
+                        if case .string(let text) = message { await handleSocketMessage(text) }
+                    }
+                } catch {
+                    task.cancel(with: .goingAway, reason: nil)
+                    if Task.isCancelled { break }
+                    collaborators = []
+                    errorMessage = "Live sync disconnected. Reconnecting…"
+                    try? await Task.sleep(nanoseconds: delay)
+                    delay = min(delay * 2, 30_000_000_000)
+                }
+                if socket === task { socket = nil }
+            }
+        }
+    }
+
+    private func handleSocketMessage(_ raw: String) async {
+        guard let data = raw.data(using: .utf8), let message = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if message["type"] as? String == "presence-state" {
+            collaborators = (try? JSONDecoder.pkms.decode(PKMSPeerList.self, from: data).peers) ?? []
+            return
+        }
+        if message["type"] as? String == "presence", let action = message["action"] as? String {
+            if action == "leave", let id = message["clientId"] as? String { collaborators.removeAll { $0.clientId == id } }
+            else if let peerData = try? JSONSerialization.data(withJSONObject: message["peer"] ?? [:]), let peer = try? JSONDecoder.pkms.decode(PKMSPeer.self, from: peerData) {
+                collaborators.removeAll { $0.clientId == peer.clientId }; collaborators.append(peer)
+            }
+            return
+        }
+        guard let fileID = message["fileId"] as? String, let updateText = message["update"] as? String,
+              let update = Data(base64Encoded: updateText) else { return }
+        if activeFile?.id == fileID, let document {
+            _ = document.apply(update)
+            markdown = document.text
+            if let workspace = activeWorkspace { saveCache(document, workspaceID: workspace.id, fileID: fileID) }
+        }
+    }
+
+    private func sendFullState(_ doc: NativeMarkdownDocument, fileID: String) {
+        send(doc.snapshot, fileID: fileID)
+    }
+
+    private func send(_ update: Data, fileID: String?) {
+        guard !update.isEmpty, let fileID, let expectedSocket = socket, expectedSocket.state == .running,
+              let encoded = try? JSONEncoder().encode(PKMSDocumentUpdate(operationId: UUID().uuidString, fileId: fileID, update: update.base64EncodedString())),
+              let text = String(data: encoded, encoding: .utf8) else { return }
+        let previous = socketSendTask
+        socketSendTask = Task { [weak self] in
+            await previous?.value
+            guard let self, self.socket === expectedSocket, expectedSocket.state == .running else { return }
+            try? await expectedSocket.send(.string(text))
+        }
+    }
+
+    private func scheduleCache(_ doc: NativeMarkdownDocument, workspaceID: String, fileID: String) {
+        cacheTask?.cancel()
+        cacheTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            self?.saveCache(doc, workspaceID: workspaceID, fileID: fileID)
+        }
+    }
+
+    private func saveCache(_ doc: NativeMarkdownDocument, workspaceID: String, fileID: String) {
+        let url = cacheURL(workspaceID: workspaceID, fileID: fileID)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? doc.snapshot.write(to: url, options: .atomic)
+        var recent = UserDefaults.standard.stringArray(forKey: "pkms.recent.files") ?? []
+        let key = "\(workspaceID)/\(fileID)"
+        recent.removeAll { $0 == key }
+        recent.insert(key, at: 0)
+        let evicted = recent.dropFirst(20)
+        for item in evicted {
+            let pieces = item.split(separator: "/", maxSplits: 1).map(String.init)
+            if pieces.count == 2 { try? FileManager.default.removeItem(at: cacheURL(workspaceID: pieces[0], fileID: pieces[1])) }
+        }
+        UserDefaults.standard.set(Array(recent.prefix(20)), forKey: "pkms.recent.files")
+    }
+
+    private func cacheURL(workspaceID: String, fileID: String) -> URL {
+        URL.applicationSupportDirectory.appending(path: "PKMS/RecentCache/\(workspaceID)/\(fileID).crdt")
+    }
+
+    private func get<T: Decodable>(_ path: String, as type: T.Type) async throws -> T {
+        try await get(endpoint(path), as: type)
+    }
+
+    private func get<T: Decodable>(_ url: URL, as type: T.Type) async throws -> T {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try check(response, data: data)
+        return try JSONDecoder.pkms.decode(type, from: data)
+    }
+
+    private func post<Body: Encodable, Response: Decodable>(_ path: String, body: Body, as type: Response.Type, authenticated: Bool = true) async throws -> Response {
+        var request = try makeRequest(path, method: "POST", authenticated: authenticated)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try check(response, data: data)
+        return try JSONDecoder.pkms.decode(type, from: data)
+    }
+
+    private func makeRequest(_ path: String, method: String, authenticated: Bool) throws -> URLRequest {
+        var request = URLRequest(url: endpoint(path))
+        request.httpMethod = method
+        if authenticated, let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        return request
+    }
+
+    private func endpoint(_ path: String) -> URL {
+        let base = URL(string: serverAddress) ?? URL(string: "http://localhost:5173")!
+        return URL(string: path, relativeTo: base) ?? base
+    }
+
+    private func check(_ response: URLResponse, data: Data) throws {
+        guard let http = response as? HTTPURLResponse else { throw PKMSClientError.malformedResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            if http.statusCode == 401 { throw PKMSClientError.unauthorized }
+            throw decodeServerError(data, status: http.statusCode)
+        }
+    }
+
+    private func decodeServerError(_ data: Data, status: Int) -> Error {
+        let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        return PKMSClientError.http(status, payload?["message"] as? String ?? payload?["error"] as? String ?? "Request failed")
+    }
+}
+
+private struct EmptyBody: Encodable {}
+private struct ConnectBody: Encodable { let repository: String; let branch: String }
+private struct DevicePollBody: Encodable { let device_code: String; init(deviceCode: String) { device_code = deviceCode } }
+
+extension JSONDecoder {
+    static var pkms: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+}
