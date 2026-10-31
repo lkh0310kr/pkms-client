@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pkms.example.com/protocol/realtime.schema.json",
+  "title": "PKMS realtime envelope",
+  "description": "JSON envelopes carried over the authenticated workspace WebSocket. Binary Yjs/Yrs v1 updates are base64 encoded.",
+  "oneOf": [
+    { "$ref": "#/$defs/hello" },
+    { "$ref": "#/$defs/documentUpdate" },
+    { "$ref": "#/$defs/documentState" },
+    { "$ref": "#/$defs/presence" },
+    { "$ref": "#/$defs/ack" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "hello": {
+      "type": "object", "required": ["type", "protocolVersion", "clientId", "afterRevision"],
+      "properties": {
+        "type": { "const": "hello" }, "protocolVersion": { "const": 1 },
+        "clientId": { "type": "string" }, "afterRevision": { "type": "integer", "minimum": 0 }
+      }, "additionalProperties": false
+    },
+    "documentUpdate": {
+      "type": "object", "required": ["type", "operationId", "fileId", "update"],
+      "properties": {
+        "type": { "const": "document-update" }, "operationId": { "type": "string", "format": "uuid" },
+        "fileId": { "type": "string" }, "update": { "type": "string", "contentEncoding": "base64" }
+      }, "additionalProperties": false
+    },
+    "documentState": {
+      "type": "object", "required": ["type", "fileId", "revision", "update"],
+      "properties": {
+        "type": { "const": "document-state" }, "fileId": { "type": "string" },
+        "revision": { "type": "integer", "minimum": 0 }, "update": { "type": "string", "contentEncoding": "base64" }
+      }, "additionalProperties": false
+    },
+    "presence": {
+      "type": "object", "required": ["type", "fileId", "state"],
+      "properties": {
+        "type": { "const": "presence" }, "fileId": { "type": "string" },
+        "state": { "type": "object", "description": "Ephemeral user, cursor, and selection data; never persisted to GitHub." }
+      }, "additionalProperties": false
+    },
+    "ack": {
+      "type": "object", "required": ["type", "operationId", "acceptedRevision", "duplicate"],
+      "properties": {
+        "type": { "const": "ack" }, "operationId": { "type": "string", "format": "uuid" },
+        "acceptedRevision": { "type": "integer", "minimum": 0 }, "duplicate": { "type": "boolean" }
+      }, "additionalProperties": false
+    },
+    "error": {
+      "type": "object", "required": ["type", "code", "message"],
+      "properties": {
+        "type": { "const": "error" }, "code": { "type": "string" }, "message": { "type": "string" },
+        "operationId": { "type": "string", "format": "uuid" }
+      }, "additionalProperties": false
+    }
+  }
+}

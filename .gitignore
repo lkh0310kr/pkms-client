@@ -10,3 +10,10 @@ AgentRuntime/Vendor/
 AgentRuntime/RuntimeTemplate/node_modules/
 AgentRuntime/RuntimeTemplate/vendor/
 AgentRuntime/*.tgz
+node_modules/
+apps/web/.wrangler/
+apps/web/build/
+apps/web/.react-router/
+target/
+*.xcframework
+apps/ios/.build/

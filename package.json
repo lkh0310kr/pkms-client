@@ -1,0 +1,11 @@
+{
+  "name": "pkms-client",
+  "private": true,
+  "workspaces": ["apps/web"],
+  "scripts": {
+    "dev": "npm run dev -w @pkms/web",
+    "build": "npm run build -w @pkms/web",
+    "deploy": "npm run deploy -w @pkms/web",
+    "typecheck": "npm run typecheck -w @pkms/web"
+  }
+}
