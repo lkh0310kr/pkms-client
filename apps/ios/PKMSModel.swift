@@ -439,6 +439,15 @@ final class PKMSModel {
 
     private func handleSocketMessage(_ raw: String) async {
         guard let data = raw.data(using: .utf8), let message = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if let conflictPath = message["conflictCopyPath"] as? String, message["acceptedRevision"] != nil {
+            await reloadFiles()
+            if let conflict = files.first(where: { $0.path == conflictPath }) { await open(conflict) }
+            return
+        }
+        if message["acceptedRevision"] != nil {
+            await reloadFiles()
+            return
+        }
         if message["type"] as? String == "presence-state" {
             collaborators = (try? JSONDecoder.pkms.decode(PKMSPeerList.self, from: data).peers) ?? []
             return

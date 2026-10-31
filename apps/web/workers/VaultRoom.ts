@@ -52,12 +52,13 @@ export class VaultRoom extends DurableObject<Env> {
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS files (
-        file_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+        file_id TEXT PRIMARY KEY, path TEXT NOT NULL, kind TEXT NOT NULL,
         content TEXT, object_key TEXT, size INTEGER NOT NULL DEFAULT 0, sha TEXT, previous_path TEXT,
         revision INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS documents (file_id TEXT PRIMARY KEY, state_update BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS operations (operation_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, result TEXT NOT NULL);
+      CREATE UNIQUE INDEX IF NOT EXISTS active_file_paths ON files (path) WHERE deleted = 0;
     `);
   }
 
@@ -77,6 +78,10 @@ export class VaultRoom extends DurableObject<Env> {
 
   private file(fileId: string): FileRow | undefined {
     return this.ctx.storage.sql.exec<FileRow>("SELECT * FROM files WHERE file_id = ? AND deleted = 0", fileId).toArray()[0];
+  }
+
+  private fileIncludingDeleted(fileId: string): FileRow | undefined {
+    return this.ctx.storage.sql.exec<FileRow>("SELECT * FROM files WHERE file_id = ?", fileId).toArray()[0];
   }
 
   private async github(token: string, path: string, init: RequestInit = {}): Promise<Response> {
@@ -360,7 +365,7 @@ export class VaultRoom extends DurableObject<Env> {
       const parent = components.slice(0, index).join("/");
       if (this.pathExists(parent)) continue;
       const fileId = `folder-${parent}`;
-      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO files (file_id,path,kind,revision,deleted,dirty) VALUES (?,?, 'folder',0,0,?)", fileId, parent, dirty ? 1 : 0);
+      this.ctx.storage.sql.exec("INSERT INTO files (file_id,path,kind,revision,deleted,dirty) VALUES (?,?, 'folder',0,0,?) ON CONFLICT(file_id) DO UPDATE SET path = excluded.path, deleted = 0, dirty = excluded.dirty", fileId, parent, dirty ? 1 : 0);
     }
   }
 
@@ -437,8 +442,10 @@ export class VaultRoom extends DurableObject<Env> {
 
   private async applyDocumentUpdate(data: Record<string, unknown>, fileId: string, socket?: WebSocket): Promise<Response> {
     const operationId = String(data.operationId ?? "");
-    const file = this.file(fileId);
-    if (!operationId || !file || file.kind !== "markdown" || typeof data.update !== "string") {
+    const source = this.fileIncludingDeleted(fileId);
+    const conflictId = source?.deleted ? this.getMeta(`deletedConflict:${fileId}`) : undefined;
+    let file = conflictId ? this.file(conflictId) : source?.deleted ? undefined : source;
+    if (!operationId || !source || source.kind !== "markdown" || typeof data.update !== "string" || (source.deleted && conflictId && !file)) {
       const message = { type: "error", code: "invalid_document_update", message: "Document or update is invalid", operationId };
       socket?.send(JSON.stringify(message));
       return json(message, { status: 400 });
@@ -451,7 +458,8 @@ export class VaultRoom extends DurableObject<Env> {
     }
     try {
       const update = fromB64(data.update);
-      const doc = this.document(fileId);
+      const documentId = file?.file_id ?? fileId;
+      const doc = this.document(documentId);
       const before = Y.encodeStateAsUpdate(doc);
       Y.applyUpdate(doc, update);
       const state = Y.encodeStateAsUpdate(doc);
@@ -467,15 +475,33 @@ export class VaultRoom extends DurableObject<Env> {
         socket?.send(JSON.stringify(message));
         return json(message, { status: 413 });
       }
+      let conflictCopyPath: string | undefined;
+      if (source.deleted && !file) {
+        const attachment = socket?.deserializeAttachment() as { clientId?: string } | null;
+        const clientId = String(attachment?.clientId ?? data.clientId ?? "offline");
+        conflictCopyPath = this.uniqueConflictPath(source.path, clientId);
+        const conflictFileId = crypto.randomUUID();
+        this.ensureParents(conflictCopyPath);
+        this.saveDocument(fileId, state);
+        this.saveDocument(conflictFileId, state);
+        const size = encoder.encode(content).byteLength;
+        this.ctx.storage.sql.exec(
+          "INSERT INTO files (file_id,path,kind,content,size,revision,deleted,dirty) VALUES (?,?,'markdown',?,?,0,0,1)",
+          conflictFileId, conflictCopyPath, content, size
+        );
+        this.setMeta(`deletedConflict:${fileId}`, conflictFileId);
+        file = this.file(conflictFileId);
+      }
+      const targetFileId = file?.file_id ?? fileId;
       const revision = this.nextRevision();
-      this.saveDocument(fileId, state);
-      this.ctx.storage.sql.exec("UPDATE files SET content = ?, size = ?, revision = ?, dirty = 1 WHERE file_id = ?", content, encoder.encode(content).byteLength, revision, fileId);
-      const result = { operationId, acceptedRevision: revision, duplicate: false };
+      this.saveDocument(targetFileId, state);
+      this.ctx.storage.sql.exec("UPDATE files SET content = ?, size = ?, revision = ?, dirty = 1 WHERE file_id = ?", content, encoder.encode(content).byteLength, revision, targetFileId);
+      const result = { operationId, acceptedRevision: revision, duplicate: false, ...(conflictCopyPath ? { conflictCopyPath } : {}) };
       this.ctx.storage.sql.exec("INSERT INTO operations (operation_id,revision,result) VALUES (?,?,?)", operationId, revision, JSON.stringify(result));
       await this.scheduleFlush();
       const message = { type: "ack", ...result };
       socket?.send(JSON.stringify(message));
-      this.broadcast({ type: "document-update", fileId, revision, update: data.update, operationId }, socket);
+      this.broadcast({ type: "document-update", fileId: targetFileId, revision, update: data.update, operationId }, socket);
       return json(message);
     } catch {
       const message = { type: "error", code: "invalid_document_update", message: "CRDT update could not be applied", operationId };

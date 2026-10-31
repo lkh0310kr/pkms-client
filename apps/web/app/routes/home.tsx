@@ -10,7 +10,7 @@ interface Repository { fullName: string; defaultBranch: string; private: boolean
 interface Workspace { id: string; repository: string; branch: string; revision: number; githubStatus: string; message?: string }
 interface FileRecord { id: string; path: string; kind: "markdown" | "asset" | "folder"; content?: string; size?: number; revision?: number }
 interface SyncStatus { githubStatus: string; pendingFiles: number; message?: string; lastGitHubCommitAt?: string; nextGitHubFlushAt?: number }
-interface RealtimeMessage { type: string; fileId?: string; update?: string; operationId?: string; acceptedRevision?: number; revision?: number; message?: string; code?: string }
+interface RealtimeMessage { type: string; fileId?: string; update?: string; operationId?: string; acceptedRevision?: number; conflictCopyPath?: string; revision?: number; message?: string; code?: string }
 interface Peer { clientId: string; login: string; avatarUrl?: string; fileId?: string }
 
 function toBase64(bytes: Uint8Array): string {
@@ -61,6 +61,7 @@ export default function Home() {
   const [saving, setSaving] = useState(false);
   const [peers, setPeers] = useState<Peer[]>([]);
   const socket = useRef<WebSocket | null>(null);
+  const openFileRef = useRef<((file: FileRecord) => Promise<void>) | null>(null);
   const docs = useRef(new Map<string, { doc: Y.Doc; persistence: IndexeddbPersistence; observer?: () => void; updateHandler?: (update: Uint8Array, origin: unknown) => void }>());
   const activeRef = useRef<{ file: FileRecord | null; doc: Y.Doc | null; text: Y.Text | null; value: string }>({ file: null, doc: null, text: null, value: "" });
   const pending = useRef(new Map<string, RealtimeMessage>());
@@ -143,10 +144,23 @@ export default function Home() {
         pending.current.delete(message.operationId);
         setSaving(pending.current.size > 0);
         setNotice("Saved to cloud");
+        if (message.conflictCopyPath) {
+          void api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`).then(async (snapshot) => {
+            setFiles(snapshot.files);
+            const conflict = snapshot.files.find((file) => file.path === message.conflictCopyPath);
+            if (conflict) await openFileRef.current?.(conflict);
+          }).catch(() => {});
+        }
       } else if (message.type === "error") {
         setError(message.message ?? "Collaboration sync failed");
       } else if (typeof message.acceptedRevision === "number") {
-        void api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`).then((snapshot) => setFiles(snapshot.files)).catch(() => {});
+        void api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`).then(async (snapshot) => {
+          setFiles(snapshot.files);
+          if (message.conflictCopyPath) {
+            const conflict = snapshot.files.find((file) => file.path === message.conflictCopyPath);
+            if (conflict) await openFileRef.current?.(conflict);
+          }
+        }).catch(() => {});
       }
       };
       ws.onclose = () => {
@@ -258,6 +272,7 @@ export default function Home() {
     }
     hydrating.current = false;
   }, [activeWorkspace?.id, api]);
+  openFileRef.current = openFile;
 
   const chooseWorkspace = (workspace: Workspace) => {
     setActiveWorkspace(workspace); setActiveFile(null); activeRef.current = { file: null, doc: null, text: null, value: "" };
