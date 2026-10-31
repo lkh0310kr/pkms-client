@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 import UniformTypeIdentifiers
 
 struct PKMSUser: Codable, Hashable {
@@ -114,14 +115,14 @@ struct PKMSHello: Encodable {
 
 enum PKMSClientError: LocalizedError {
     case invalidServerURL
-    case unauthorized
+    case unauthorized(String?)
     case http(Int, String)
     case malformedResponse
 
     var errorDescription: String? {
         switch self {
         case .invalidServerURL: "Enter a valid PKMS server URL."
-        case .unauthorized: "Sign in with GitHub to continue."
+        case .unauthorized(let requestID): "Sign in with GitHub to continue.\(requestID.map { " · \($0)" } ?? "")"
         case .http(let code, let message): "Server error \(code): \(message)"
         case .malformedResponse: "The PKMS server returned an invalid response."
         }
@@ -131,6 +132,7 @@ enum PKMSClientError: LocalizedError {
 @MainActor
 @Observable
 final class PKMSModel {
+    private let authLogger = Logger(subsystem: "com.pkms.client", category: "auth")
     var serverAddress: String {
         didSet { UserDefaults.standard.set(serverAddress, forKey: "pkms.serverAddress") }
     }
@@ -176,13 +178,18 @@ final class PKMSModel {
 
     func beginSignIn() async {
         errorMessage = nil
+        authLogger.info("device sign-in started")
         do {
             let result = try await post("/api/auth/device/start", body: EmptyBody(), as: PKMSDeviceStart.self, authenticated: false)
+            authLogger.info("device code received")
             deviceCode = result.user_code
             verificationURL = result.verification_uri
             deviceTask?.cancel()
             deviceTask = Task { await pollDeviceCode(result) }
-        } catch { errorMessage = error.localizedDescription }
+        } catch {
+            authLogger.error("device sign-in start failed: \(String(reflecting: type(of: error)), privacy: .public)")
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func pollDeviceCode(_ flow: PKMSDeviceStart) async {
@@ -197,13 +204,15 @@ final class PKMSModel {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let http = response as? HTTPURLResponse else { throw PKMSClientError.malformedResponse }
                 if http.statusCode == 202 {
+                    authLogger.info("device authorization pending")
                     let pending = try JSONDecoder().decode(PKMSDevicePoll.self, from: data)
                     delay = max(pending.interval ?? flow.interval, 5)
                     continue
                 }
-                guard (200..<300).contains(http.statusCode) else { throw decodeServerError(data, status: http.statusCode) }
+                guard (200..<300).contains(http.statusCode) else { throw decodeServerError(data, status: http.statusCode, requestID: http.value(forHTTPHeaderField: "X-Request-ID")) }
                 let result = try JSONDecoder().decode(PKMSDevicePoll.self, from: data)
                 guard let issued = result.token, let signedInUser = result.user else { throw PKMSClientError.malformedResponse }
+                authLogger.info("device sign-in completed")
                 token = issued
                 user = signedInUser
                 SessionVault.write(issued, for: serverAddress)
@@ -212,7 +221,11 @@ final class PKMSModel {
                 await loadWorkspaces()
                 return
             } catch is CancellationError { return }
-            catch { errorMessage = error.localizedDescription; return }
+            catch {
+                authLogger.error("device sign-in failed: \(String(reflecting: type(of: error)), privacy: .public)")
+                errorMessage = error.localizedDescription
+                return
+            }
         }
         deviceCode = nil
         verificationURL = nil
@@ -550,14 +563,16 @@ final class PKMSModel {
     private func check(_ response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { throw PKMSClientError.malformedResponse }
         guard (200..<300).contains(http.statusCode) else {
-            if http.statusCode == 401 { throw PKMSClientError.unauthorized }
-            throw decodeServerError(data, status: http.statusCode)
+            let requestID = http.value(forHTTPHeaderField: "X-Request-ID")
+            if http.statusCode == 401 { throw PKMSClientError.unauthorized(requestID) }
+            throw decodeServerError(data, status: http.statusCode, requestID: requestID)
         }
     }
 
-    private func decodeServerError(_ data: Data, status: Int) -> Error {
+    private func decodeServerError(_ data: Data, status: Int, requestID: String? = nil) -> Error {
         let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        return PKMSClientError.http(status, payload?["message"] as? String ?? payload?["error"] as? String ?? "Request failed")
+        let message = payload?["message"] as? String ?? payload?["error"] as? String ?? "Request failed"
+        return PKMSClientError.http(status, requestID.map { "\(message) · \($0)" } ?? message)
     }
 }
 

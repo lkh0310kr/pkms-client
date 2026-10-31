@@ -3,6 +3,7 @@ import { IndexeddbPersistence } from "y-indexeddb";
 import * as Y from "yjs";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useSearchParams } from "react-router";
 import type { Route } from "./+types/home";
 
 interface User { login: string; avatarUrl?: string }
@@ -67,6 +68,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showRepositories, setShowRepositories] = useState(false);
   const [saving, setSaving] = useState(false);
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -93,7 +95,9 @@ export default function Home() {
     const response = await fetch(path, { credentials: "same-origin", ...init });
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as { message?: string; error?: string };
-      throw new Error(body.message ?? body.error ?? `Request failed (${response.status})`);
+      const requestId = response.headers.get("X-Request-ID") ?? (body as { requestId?: string }).requestId;
+      const message = body.message ?? body.error ?? `Request failed (${response.status})`;
+      throw new Error(`${message}${requestId ? ` · ${requestId}` : ""}`);
     }
     if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;
@@ -119,6 +123,29 @@ export default function Home() {
     })();
     return () => { alive = false; };
   }, [api, refreshWorkspaces]);
+
+  useEffect(() => {
+    const reason = searchParams.get("auth_error");
+    if (!reason) return;
+    const requestId = searchParams.get("request_id");
+    const messages: Record<string, string> = {
+      github_access_denied: "GitHub access was declined.",
+      github_authorization_failed: "GitHub authorization failed.",
+      invalid_oauth_state: "Sign-in expired. Try again.",
+      github_code_rejected: "GitHub rejected the sign-in code.",
+      github_token_missing: "GitHub did not return an access token.",
+      github_user_lookup_failed: "Could not read the GitHub account.",
+      github_credentials_store_failed: "Could not save GitHub credentials.",
+      session_create_failed: "Could not create a session.",
+      github_token_exchange_failed: "Could not exchange the GitHub sign-in code.",
+      oauth_callback_internal_error: "GitHub sign-in failed. Check the request log.",
+    };
+    setError(`${messages[reason] ?? "GitHub sign-in failed."}${requestId ? ` · ${requestId}` : ""}`);
+    const next = new URLSearchParams(searchParams);
+    next.delete("auth_error");
+    next.delete("request_id");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     if (!activeWorkspace) {

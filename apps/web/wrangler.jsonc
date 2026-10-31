@@ -8,7 +8,10 @@
     "directory": "./build/client",
     "binding": "ASSET_FILES"
   },
-  "observability": { "enabled": true },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": false, "head_sampling_rate": 1 }
+  },
   "vars": {
     "PUBLIC_ORIGIN": "https://pkms-cloud.lkh0310kr.workers.dev"
   },

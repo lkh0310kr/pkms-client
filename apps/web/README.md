@@ -12,6 +12,16 @@ The React Router app and API run in one Cloudflare Worker. Durable Objects hold 
 
 The current deployment uses `https://pkms-cloud.lkh0310kr.workers.dev` as `PUBLIC_ORIGIN`. Its `SESSION_SECRET` and `DATA_ENCRYPTION_KEY` are already configured. Configure the GitHub App callback URL as `https://pkms-cloud.lkh0310kr.workers.dev/api/auth/github/callback`, then add `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` with `npx wrangler secret put NAME` to enable sign-in.
 
+## Login diagnostics
+
+Each request returns an `X-Request-ID`. Sign-in failures show this ID on the page and emit structured stage events without OAuth codes, tokens, cookies, or request query strings. Stored invocation logs are disabled. To follow only safe application events, run this from the web app directory:
+
+```sh
+npx wrangler tail pkms-cloud --format json | jq --unbuffered 'select((.logs // [] | length) > 0 or (.exceptions // [] | length) > 0) | del(.event)'
+```
+
+Match the log `requestId` to the ID shown in the browser. Filtering removes the request URL and headers from the tail output.
+
 ## Personal free-tier deployment
 
 The app uses SQLite-backed Durable Objects and hibernatable WebSockets. One workspace room serializes updates and sets an alarm on the first pending change; the alarm batches GitHub commits no later than 15 minutes after that change. External branch movement pauses automatic commits. Free-plan limit exhaustion can make writes fail, so the UI must retain the local IndexedDB cache and show retry state.

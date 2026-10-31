@@ -19,20 +19,42 @@ interface GitHubGrant {
   error?: string;
 }
 
-async function saveGitHubGrant(env: Env, grant: GitHubGrant): Promise<Session> {
-  if (!grant.access_token) throw new Error(grant.error ?? "GitHub token missing");
+function trace(requestId: string, event: string, fields: Record<string, string | number | boolean | undefined> = {}): void {
+  const level = event.endsWith(".failed") ? "error" : event.endsWith(".rejected") ? "warn" : "info";
+  const entry = JSON.stringify({ time: new Date().toISOString(), level, requestId, event, ...fields });
+  if (level === "error") console.error(entry);
+  else if (level === "warn") console.warn(entry);
+  else console.log(entry);
+}
+
+class AuthFlowError extends Error {
+  constructor(readonly code: string) { super(code); }
+}
+
+async function saveGitHubGrant(env: Env, grant: GitHubGrant, requestId: string): Promise<Session> {
+  if (!grant.access_token) throw new AuthFlowError("github_token_missing");
+  trace(requestId, "auth.github.user_lookup.started");
   const userResponse = await fetch("https://api.github.com/user", {
     headers: { Authorization: `Bearer ${grant.access_token}`, Accept: "application/vnd.github+json", "User-Agent": "PKMS-Cloud/1.0" },
   });
-  if (!userResponse.ok) throw new Error("GitHub user lookup failed");
+  if (!userResponse.ok) {
+    trace(requestId, "auth.github.user_lookup.failed", { status: userResponse.status });
+    throw new AuthFlowError("github_user_lookup_failed");
+  }
   const user = await userResponse.json() as { login: string; avatar_url?: string };
+  trace(requestId, "auth.github.user_lookup.succeeded", { login: user.login });
   const stored: Record<string, unknown> = {
     accessToken: await encryptSecret(env, grant.access_token),
     user: { login: user.login, avatarUrl: user.avatar_url },
   };
   if (grant.refresh_token) stored.refreshToken = await encryptSecret(env, grant.refresh_token);
   if (grant.expires_in) stored.expiresAt = Date.now() + grant.expires_in * 1000;
-  await account(env, user.login).fetch("https://account/credentials", { method: "PUT", body: JSON.stringify(stored) });
+  const storedResponse = await account(env, user.login).fetch("https://account/credentials", { method: "PUT", body: JSON.stringify(stored) });
+  if (!storedResponse.ok) {
+    trace(requestId, "auth.github.credentials_store.failed", { status: storedResponse.status, login: user.login });
+    throw new AuthFlowError("github_credentials_store_failed");
+  }
+  trace(requestId, "auth.github.credentials_store.succeeded", { login: user.login });
   return { login: user.login, avatarUrl: user.avatar_url, expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 };
 }
 
@@ -46,10 +68,13 @@ async function credentials(env: Env, login: string): Promise<Credentials> {
   return response.json() as Promise<Credentials>;
 }
 
-async function requireSession(request: Request, env: Env): Promise<Session | Response> {
+async function requireSession(request: Request, env: Env, requestId: string): Promise<Session | Response> {
   const bearer = request.headers.get("Authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
   const session = await verifySession(env, bearer ?? cookie(request, "__Host-pkms_session"));
-  if (!session) return json({ error: "unauthorized", message: "Sign in with GitHub to continue." }, { status: 401 });
+  if (!session) {
+    trace(requestId, "auth.session.rejected", { path: new URL(request.url).pathname });
+    return json({ error: "unauthorized", requestId }, { status: 401 });
+  }
   return session;
 }
 
@@ -64,10 +89,23 @@ async function githubRequest(token: string, path: string): Promise<Response> {
   });
 }
 
-async function api(request: Request, env: Env): Promise<Response> {
+function authFailure(requestId: string, code: string, status: number): Response {
+  const location = new URL("/", "https://pkms.invalid");
+  location.searchParams.set("auth_error", code);
+  location.searchParams.set("request_id", requestId);
+  return new Response(null, { status: 302, headers: {
+    Location: `${location.pathname}${location.search}`,
+    "Set-Cookie": "__Host-pkms_oauth=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+    "Cache-Control": "no-store",
+    "X-PKMS-Auth-Status": String(status),
+  } });
+}
+
+async function api(request: Request, env: Env, requestId: string): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/api/health") return json({ ok: true, protocolVersion: 1 });
   if (request.method === "GET" && url.pathname === "/api/auth/github") {
+    trace(requestId, "auth.github.start");
     const state = randomToken(24);
     const target = new URL("https://github.com/login/oauth/authorize");
     target.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
@@ -80,19 +118,49 @@ async function api(request: Request, env: Env): Promise<Response> {
     } });
   }
   if (request.method === "GET" && url.pathname === "/api/auth/github/callback") {
+    const oauthError = url.searchParams.get("error");
     const state = url.searchParams.get("state");
     const expectedState = cookie(request, "__Host-pkms_oauth");
     const code = url.searchParams.get("code");
-    if (!state || !expectedState || state !== expectedState || !code) return json({ error: "invalid_oauth_state" }, { status: 400 });
+    if (oauthError) {
+      const code = oauthError === "access_denied" ? "github_access_denied" : "github_authorization_failed";
+      trace(requestId, "auth.github.callback.rejected", { reason: code });
+      return authFailure(requestId, code, 403);
+    }
+    if (!state || !expectedState || state !== expectedState || !code) {
+      const reason = !state ? "state_missing" : !expectedState ? "oauth_cookie_missing" : state !== expectedState ? "state_mismatch" : "code_missing";
+      trace(requestId, "auth.github.callback.rejected", { reason });
+      return authFailure(requestId, "invalid_oauth_state", 400);
+    }
+    trace(requestId, "auth.github.token_exchange.started");
     const exchange = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" },
       body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code }),
     });
-    if (!exchange.ok) return json({ error: "github_token_exchange_failed" }, { status: 502 });
+    if (!exchange.ok) {
+      trace(requestId, "auth.github.token_exchange.failed", { status: exchange.status });
+      return authFailure(requestId, "github_token_exchange_failed", 502);
+    }
     const grant = await exchange.json() as { access_token?: string; refresh_token?: string; expires_in?: number; refresh_token_expires_in?: number; error?: string };
-    if (!grant.access_token) return json({ error: grant.error ?? "github_token_missing" }, { status: 502 });
-    const session = await saveGitHubGrant(env, grant);
-    const signed = await signSession(env, session);
+    if (!grant.access_token) {
+      const error = grant.error === "bad_verification_code" ? "github_code_rejected" : "github_token_missing";
+      trace(requestId, "auth.github.token_exchange.rejected", { reason: error });
+      return authFailure(requestId, error, 502);
+    }
+    let session: Session;
+    try { session = await saveGitHubGrant(env, grant, requestId); }
+    catch (error) {
+      const code = error instanceof AuthFlowError ? error.code : "github_credentials_store_failed";
+      trace(requestId, "auth.github.callback.failed", { stage: code });
+      return authFailure(requestId, code, 502);
+    }
+    let signed: string;
+    try { signed = await signSession(env, session); }
+    catch {
+      trace(requestId, "auth.github.session_sign.failed", { login: session.login });
+      return authFailure(requestId, "session_create_failed", 500);
+    }
+    trace(requestId, "auth.github.completed", { login: session.login });
     return new Response(null, { status: 302, headers: {
       Location: "/",
       "Cache-Control": "no-store",
@@ -100,17 +168,27 @@ async function api(request: Request, env: Env): Promise<Response> {
     } });
   }
   if (request.method === "POST" && url.pathname === "/api/auth/device/start") {
-    if (!sameOrigin(request, env)) return json({ error: "origin_mismatch" }, { status: 403 });
+    if (!sameOrigin(request, env)) {
+      trace(requestId, "auth.device.start.rejected", { reason: "origin_mismatch" });
+      return json({ error: "origin_mismatch", requestId }, { status: 403 });
+    }
+    trace(requestId, "auth.device.start");
     const response = await fetch("https://github.com/login/device/code", {
       method: "POST", headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ client_id: env.GITHUB_CLIENT_ID }),
     });
     const device = await response.json() as { device_code?: string; user_code?: string; verification_uri?: string; expires_in?: number; interval?: number; error?: string };
-    if (!response.ok || !device.device_code) return json({ error: device.error ?? "device_flow_unavailable" }, { status: 502 });
+    if (!response.ok || !device.device_code) {
+      trace(requestId, "auth.device.start.failed", { status: response.status, reason: device.error ?? "device_flow_unavailable" });
+      return json({ error: device.error ?? "device_flow_unavailable", requestId }, { status: 502 });
+    }
     return json(device, { status: 200 });
   }
   if (request.method === "POST" && url.pathname === "/api/auth/device/poll") {
-    if (!sameOrigin(request, env)) return json({ error: "origin_mismatch" }, { status: 403 });
+    if (!sameOrigin(request, env)) {
+      trace(requestId, "auth.device.poll.rejected", { reason: "origin_mismatch" });
+      return json({ error: "origin_mismatch", requestId }, { status: 403 });
+    }
     const body = await request.json() as { deviceCode?: string };
     if (!body.deviceCode || body.deviceCode.length > 2048) return json({ error: "invalid_device_code" }, { status: 400 });
     const response = await fetch("https://github.com/login/oauth/access_token", {
@@ -119,8 +197,17 @@ async function api(request: Request, env: Env): Promise<Response> {
     });
     const grant = await response.json() as GitHubGrant;
     if (grant.error === "authorization_pending" || grant.error === "slow_down") return json({ pending: true, interval: grant.error === "slow_down" ? 10 : undefined }, { status: 202 });
-    if (!response.ok || !grant.access_token) return json({ error: grant.error ?? "device_authorization_failed" }, { status: 400 });
-    const session = await saveGitHubGrant(env, grant);
+    if (!response.ok || !grant.access_token) {
+      trace(requestId, "auth.device.poll.failed", { status: response.status, reason: grant.error ?? "device_authorization_failed" });
+      return json({ error: grant.error ?? "device_authorization_failed", requestId }, { status: 400 });
+    }
+    let session: Session;
+    try { session = await saveGitHubGrant(env, grant, requestId); }
+    catch (error) {
+      const code = error instanceof AuthFlowError ? error.code : "github_credentials_store_failed";
+      trace(requestId, "auth.device.complete.failed", { stage: code });
+      return json({ error: code, requestId }, { status: 502 });
+    }
     const token = await signSession(env, session);
     return json({ pending: false, token, user: { login: session.login, avatarUrl: session.avatarUrl }, expiresAt: session.expiresAt });
   }
@@ -134,7 +221,7 @@ async function api(request: Request, env: Env): Promise<Response> {
     return new Response(null, { status: 204, headers: { "Set-Cookie": sessionCookie("", 0), "Cache-Control": "no-store" } });
   }
 
-  const auth = await requireSession(request, env);
+  const auth = await requireSession(request, env, requestId);
   if (auth instanceof Response) return auth;
   if (!sameOrigin(request, env)) return json({ error: "origin_mismatch" }, { status: 403 });
   const authCredentials = await credentials(env, auth.login);
@@ -208,10 +295,28 @@ const requestHandler = createRequestHandler(() => import("virtual:react-router/s
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
+    const startedAt = Date.now();
+    let response: Response;
     if (url.pathname.startsWith("/api/")) {
-      try { return await api(request, env); }
-      catch (error) { return json({ error: "server_error", message: error instanceof Error ? error.message : "Unexpected error" }, { status: 500 }); }
+      try { response = await api(request, env, requestId); }
+      catch (error) {
+        trace(requestId, "request.failed", { method: request.method, path: url.pathname, errorType: error instanceof Error ? error.name : "UnknownError" });
+        response = url.pathname === "/api/auth/github/callback"
+          ? authFailure(requestId, "oauth_callback_internal_error", 500)
+          : json({ error: "server_error", requestId }, { status: 500 });
+      }
+    } else {
+      try { response = await requestHandler(request); }
+      catch (error) {
+        trace(requestId, "request.failed", { method: request.method, path: url.pathname, errorType: error instanceof Error ? error.name : "UnknownError" });
+        response = new Response("Internal Server Error", { status: 500 });
+      }
     }
-    return requestHandler(request);
+    trace(requestId, "request.completed", { method: request.method, path: url.pathname, status: response.status, durationMs: Date.now() - startedAt });
+    if (response.status === 101) return response;
+    const headers = new Headers(response.headers);
+    headers.set("X-Request-ID", requestId);
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   },
 } satisfies ExportedHandler<Env>;
