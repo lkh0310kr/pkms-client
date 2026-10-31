@@ -10,7 +10,7 @@ The React Router app and API run in one Cloudflare Worker. Durable Objects hold 
 4. Create the attachment bucket once with `npx wrangler r2 bucket create pkms-attachments`.
 5. Start with `npm run dev` from the repository root.
 
-For a deployed Worker, set `PUBLIC_ORIGIN` in `wrangler.jsonc` to the deployed HTTPS origin and add `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SESSION_SECRET`, and `DATA_ENCRYPTION_KEY` with `npx wrangler secret put NAME`.
+The current deployment uses `https://pkms-cloud.lkh0310kr.workers.dev` as `PUBLIC_ORIGIN`. Its `SESSION_SECRET` and `DATA_ENCRYPTION_KEY` are already configured. Configure the GitHub App callback URL as `https://pkms-cloud.lkh0310kr.workers.dev/api/auth/github/callback`, then add `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` with `npx wrangler secret put NAME` to enable sign-in.
 
 ## Personal free-tier deployment
 

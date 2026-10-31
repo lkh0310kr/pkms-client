@@ -10,7 +10,7 @@
   },
   "observability": { "enabled": true },
   "vars": {
-    "PUBLIC_ORIGIN": "http://localhost:5173"
+    "PUBLIC_ORIGIN": "https://pkms-cloud.lkh0310kr.workers.dev"
   },
   "durable_objects": {
     "bindings": [
