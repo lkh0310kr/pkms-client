@@ -18,7 +18,10 @@ interface RefResponse { object: { sha: string } }
 interface TreeResponse { sha: string; tree: Array<{ path: string; mode: string; type: string; sha: string; size?: number }>; truncated: boolean }
 interface DirectoryRow { [key: string]: SqlStorageValue; path: string; tree_sha: string; loaded: number }
 class GitHubRequestError extends Error {
-  constructor(readonly status: number) { super(`GitHub request failed (HTTP ${status})`); this.name = "GitHubRequestError"; }
+  constructor(readonly status: number, readonly operation: string) {
+    super(`GitHub request failed (HTTP ${status}) during ${operation}`);
+    this.name = "GitHubRequestError";
+  }
 }
 
 function asBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
@@ -97,7 +100,16 @@ export class VaultRoom extends DurableObject<Env> {
     headers.set("X-GitHub-Api-Version", "2022-11-28");
     headers.set("User-Agent", "PKMS-Cloud/1.0");
     const response = await fetch(`https://api.github.com${path}`, { ...init, headers });
-    if (!response.ok) throw new GitHubRequestError(response.status);
+    if (!response.ok) {
+      const method = (init.method ?? "GET").toUpperCase();
+      const operation = path.endsWith("/git/blobs") ? "blob.create"
+        : path.endsWith("/git/trees") ? "tree.create"
+        : path.endsWith("/git/commits") ? "commit.create"
+        : path.includes("/git/commits/") ? "commit.read"
+        : path.includes("/git/ref/heads/") ? (method === "PATCH" ? "ref.update" : "ref.read")
+        : "other";
+      throw new GitHubRequestError(response.status, operation);
+    }
     return response;
   }
 
@@ -603,7 +615,8 @@ export class VaultRoom extends DurableObject<Env> {
     this.setMeta("githubMessage", upstreamStatus ? `GitHub sync failed (HTTP ${upstreamStatus}). Retrying automatically.` : "GitHub sync failed. Retrying automatically.");
     this.setMeta("retryCount", String(Math.min(7, retryCount + 1)));
     await this.ctx.storage.setAlarm(Date.now() + retryAfterMs);
-    console.error(JSON.stringify({ event: "github.flush.failed", source, errorType, upstreamStatus, retryAfterMs, pendingFiles }));
+    const operation = error instanceof GitHubRequestError ? error.operation : undefined;
+    console.error(JSON.stringify({ event: "github.flush.failed", source, errorType, upstreamStatus, operation, retryAfterMs, pendingFiles }));
   }
 
   private async flushGitHub(): Promise<void> {
