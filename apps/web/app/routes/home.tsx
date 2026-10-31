@@ -37,6 +37,16 @@ function entryName(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
+function matchesExcludePattern(path: string, pattern: string): boolean {
+  const normalized = pattern.trim().replace(/^\/+|\/+$/g, "");
+  if (!normalized) return false;
+  const escape = (value: string) => value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&").replace(/\*/g, "\\*?");
+  const source = normalized.split("**").map(escape).join(".*").replace(/\\\*\?/g, "[^/]*");
+  const expression = new RegExp(normalized.includes("/") ? `^${source}$` : `(^|/)${source}$`);
+  const segments = path.split("/");
+  return segments.some((_, index) => expression.test(segments.slice(0, index + 1).join("/")) || expression.test(segments[index]));
+}
+
 interface TreeRow { file: FileRecord; depth: number }
 function flattenTree(files: FileRecord[], expanded: Set<string>): TreeRow[] {
   const children = new Map<string, FileRecord[]>();
@@ -92,6 +102,8 @@ export default function Home() {
   const [focusedTreePath, setFocusedTreePath] = useState<string | null>(null);
   const [editorMode, setEditorMode] = useState<"live" | "source" | "read">("live");
   const [showHiddenFiles, setShowHiddenFiles] = useState(false);
+  const [excludedPatterns, setExcludedPatterns] = useState("");
+  const [showFileFilters, setShowFileFilters] = useState(false);
   const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true);
   const [activeFile, setActiveFile] = useState<FileRecord | null>(null);
   const [openTabs, setOpenTabs] = useState<FileRecord[]>([]);
@@ -119,6 +131,8 @@ export default function Home() {
   useEffect(() => {
     if (!activeWorkspace) return;
     setShowHiddenFiles(localStorage.getItem(`pkms:show-hidden:${activeWorkspace.id}`) === "true");
+    setExcludedPatterns(localStorage.getItem(`pkms:excluded-files:${activeWorkspace.id}`) ?? "");
+    setShowFileFilters(false);
   }, [activeWorkspace?.id]);
 
   const clearActiveFile = () => {
@@ -549,7 +563,10 @@ export default function Home() {
     setText(next);
   };
 
-  const visibleFiles = showHiddenFiles ? files : files.filter((file) => !file.path.split("/").some((part) => part.startsWith(".")));
+  const visibleFiles = files.filter((file) =>
+    (showHiddenFiles || !file.path.split("/").some((part) => part.startsWith("."))) &&
+    !excludedPatterns.split("\n").some((pattern) => matchesExcludePattern(file.path, pattern))
+  );
   const treeRows = flattenTree(visibleFiles, expandedFolders);
   const parentFolder = parentPath(currentFolder);
   const persistTreeScroll = (scrollTop: number) => {
@@ -695,7 +712,7 @@ export default function Home() {
         </div>
         {activeWorkspace && <>
           <div className="file-toolbar"><span className="eyebrow">FILES</span><div className="toolbar-actions">
-            <button className={`mini-button visibility-button${showHiddenFiles ? " active" : ""}`} title={showHiddenFiles ? "Hide hidden files" : "Show hidden files"} aria-label={showHiddenFiles ? "Hide hidden files" : "Show hidden files"} aria-pressed={showHiddenFiles} onClick={() => { const next = !showHiddenFiles; setShowHiddenFiles(next); localStorage.setItem(`pkms:show-hidden:${activeWorkspace.id}`, String(next)); }}>◌</button>
+            <button className={`mini-button visibility-button${showFileFilters ? " active" : ""}`} title="File visibility settings" aria-label="File visibility settings" aria-expanded={showFileFilters} onClick={() => setShowFileFilters((open) => !open)}>◉</button>
             <button className="mini-button" title="New note" onClick={newNote}>＋</button>
             <button className="mini-button" title="New folder" onClick={newFolder}>▱</button>
             <label className="mini-button upload-button" title="Upload file">↑<input type="file" onChange={(event) => { void uploadFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
@@ -704,6 +721,7 @@ export default function Home() {
             {!activeFile && currentFolder && <button className="mini-button" title="Rename folder" onClick={renameCurrentFolder}>✎</button>}
             {!activeFile && currentFolder && <button className="mini-button" title="Delete folder" onClick={() => void deleteCurrentFolder()}>×</button>}
           </div></div>
+          {showFileFilters && <div className="file-filter-panel"><div className="file-filter-heading"><span>Show hidden files</span><button className={`mini-button visibility-button${showHiddenFiles ? " active" : ""}`} aria-pressed={showHiddenFiles} onClick={() => { const next = !showHiddenFiles; setShowHiddenFiles(next); localStorage.setItem(`pkms:show-hidden:${activeWorkspace.id}`, String(next)); }}>{showHiddenFiles ? "On" : "Off"}</button></div><label htmlFor="excluded-files">Exclude paths</label><textarea id="excluded-files" value={excludedPatterns} placeholder={"*.tmp\n**/drafts/**"} spellCheck={false} onChange={(event) => { const next = event.target.value; setExcludedPatterns(next); localStorage.setItem(`pkms:excluded-files:${activeWorkspace.id}`, next); }} /><p>One glob per line</p></div>}
           <nav ref={treeRef} className="file-list file-tree" role="tree" aria-label="Repository files" aria-busy={loadingFolder} onKeyDown={handleTreeKeyDown} onScroll={(event) => persistTreeScroll(event.currentTarget.scrollTop)}>
             {treeRows.map(({ file, depth }, index) => <button
               key={file.id}
@@ -749,7 +767,7 @@ export default function Home() {
         {quickOpen && <div className="modal-backdrop quick-open-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickOpen(false); }}><section className="quick-open-modal" role="dialog" aria-modal="true" aria-label="Quick open"><input ref={quickOpenInput} value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} placeholder="Search open and loaded files…" onKeyDown={(event) => { if (event.key === "Escape") setQuickOpen(false); else if (event.key === "Enter" && quickOpenResults[0]) { void openFile(quickOpenResults[0]); setQuickOpen(false); } }} /><div className="quick-open-results">{quickOpenResults.map((file) => <button key={file.id} onClick={() => { void openFile(file); setQuickOpen(false); }}><span>{entryName(file.path)}</span><small>{file.path}</small></button>)}{!quickOpenResults.length && <p className="empty-hint">No loaded files found</p>}</div></section></div>}
         {!activeWorkspace ? <div className="empty-workspace"><h2>No workspace</h2><button className="primary-button" onClick={openRepositoryPicker}>Connect repository</button></div> : !activeFile ? <div className="empty-workspace"><h2>No file open</h2><button className="primary-button" onClick={newNote}>New note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout">
           <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div><div className="editor-controls"><label className="editor-mode-select"><span className="sr-only">Editor view</span><select value={editorMode} onChange={(event) => setEditorMode(event.target.value as "live" | "source" | "read")}><option value="live">Live</option><option value="source">Source</option><option value="read">Read</option></select><span aria-hidden="true">{editorMode === "source" ? "Source" : editorMode === "read" ? "Read" : "Live"}⌄</span></label><button className="save-button" onClick={saveActiveFileNow} title="Save now (⌘S / Ctrl+S)">Save</button></div></div>
-          <div className={`editor-columns mode-${editorMode}`}><div className="source-column"><div className="column-label">WRITE</div><Suspense fallback={<div className="editor-loading">Opening editor…</div>}><MarkdownCodeEditor key={activeFile.id} value={text} onChange={handleText} /></Suspense></div><div className="preview-column"><div className="column-label">PREVIEW</div><article className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></article></div></div>
+          <div className={`editor-columns mode-${editorMode}`}><div className="source-column"><div className="column-label">SOURCE</div><Suspense fallback={<div className="editor-loading">Opening editor…</div>}><MarkdownCodeEditor key={activeFile.id} value={text} onChange={handleText} mode={editorMode} /></Suspense></div><div className="preview-column"><article className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></article></div></div>
         </div> : <div className="asset-view"><div className="file-icon large">◇</div><h2>{activeFile.path.split("/").at(-1)}</h2><p>{activeFile.size ? `${(activeFile.size / 1024).toFixed(1)} KB` : "Attachment"}</p><a className="primary-button" href={`/api/workspaces/${activeWorkspace.id}/assets/${activeFile.id}`} target="_blank" rel="noreferrer">Open file</a></div>}
         {sync.githubStatus === "external-change" && <div className="external-warning"><strong>GitHub branch changed outside PKMS.</strong><span>PKMS paused its commit so it won’t overwrite that change. {sync.message}</span></div>}
       </section>
