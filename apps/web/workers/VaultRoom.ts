@@ -106,7 +106,8 @@ export class VaultRoom extends DurableObject<Env> {
         : path.endsWith("/git/trees") ? "tree.create"
         : path.endsWith("/git/commits") ? "commit.create"
         : path.includes("/git/commits/") ? "commit.read"
-        : path.includes("/git/ref/heads/") ? (method === "PATCH" ? "ref.update" : "ref.read")
+        : path.includes("/git/refs/heads/") ? "ref.update"
+        : path.includes("/git/ref/heads/") ? "ref.read"
         : "other";
       throw new GitHubRequestError(response.status, operation);
     }
@@ -627,8 +628,10 @@ export class VaultRoom extends DurableObject<Env> {
     const branch = this.getMeta("branch")!;
     const [owner, repo] = repository.split("/");
     const token = await this.token();
-    const refPath = `/repos/${owner}/${repo}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`;
-    const ref = await (await this.github(token, refPath)).json() as RefResponse;
+    const encodedBranch = branch.split("/").map(encodeURIComponent).join("/");
+    const refReadPath = `/repos/${owner}/${repo}/git/ref/heads/${encodedBranch}`;
+    const refUpdatePath = `/repos/${owner}/${repo}/git/refs/heads/${encodedBranch}`;
+    const ref = await (await this.github(token, refReadPath)).json() as RefResponse;
     if (ref.object.sha !== this.getMeta("head")) {
       this.setMeta("githubStatus", "external-change");
       this.setMeta("githubMessage", "GitHub branch changed outside PKMS. Automatic push is paused to protect those changes.");
@@ -676,7 +679,7 @@ export class VaultRoom extends DurableObject<Env> {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: "Sync PKMS workspace", tree: tree.sha, parents: [ref.object.sha] }),
     })).json() as { sha: string };
-    await this.github(token, refPath, {
+    await this.github(token, refUpdatePath, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sha: commit.sha, force: false }),
     });
