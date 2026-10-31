@@ -161,6 +161,7 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
       return authFailure(requestId, "session_create_failed", 500);
     }
     trace(requestId, "auth.github.completed", { login: session.login });
+    trace(requestId, "auth.github.session_cookie.issued", { login: session.login, maxAgeSeconds: 30 * 24 * 60 * 60 });
     return new Response(null, { status: 302, headers: {
       Location: "/",
       "Cache-Control": "no-store",
@@ -213,7 +214,13 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
   }
   if (request.method === "GET" && url.pathname === "/api/session") {
     const bearer = request.headers.get("Authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
-    const session = await verifySession(env, bearer ?? cookie(request, "__Host-pkms_session"));
+    const sessionCookieValue = cookie(request, "__Host-pkms_session");
+    const session = await verifySession(env, bearer ?? sessionCookieValue);
+    trace(requestId, "auth.session.checked", {
+      bearerPresent: Boolean(bearer),
+      cookiePresent: Boolean(sessionCookieValue),
+      sessionValid: Boolean(session),
+    });
     return json({ user: session ? { login: session.login, avatarUrl: session.avatarUrl } : null });
   }
   if (request.method === "POST" && url.pathname === "/api/logout") {
