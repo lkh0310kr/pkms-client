@@ -7,7 +7,14 @@ servers:
   - url: https://pkms.example.com
 security:
   - sessionCookie: []
+  - sessionBearer: []
 paths:
+  /api/health:
+    get:
+      operationId: getHealth
+      security: []
+      responses:
+        '200': { description: Service health and protocol version. }
   /api/session:
     get:
       operationId: getSession
@@ -143,7 +150,7 @@ paths:
           description: If present, returns changes after this revision instead of a full tree.
       responses:
         '200':
-          description: Initial state or incremental change page.
+          description: Full workspace snapshot. afterRevision is reserved for a future incremental change page.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceSnapshot' }
@@ -273,6 +280,10 @@ components:
       type: apiKey
       in: cookie
       name: __Host-pkms_session
+    sessionBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: PKMS-HMAC
   parameters:
     WorkspaceId:
       in: path
