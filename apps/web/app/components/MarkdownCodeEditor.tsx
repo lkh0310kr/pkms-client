@@ -2,54 +2,169 @@ import { useEffect, useRef } from "react";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, indentOnInput, syntaxHighlighting, syntaxTree } from "@codemirror/language";
-import { Compartment, EditorState, type Range } from "@codemirror/state";
-import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
+import { EditorState, RangeSetBuilder, StateEffect, StateField, type Extension } from "@codemirror/state";
+import { Decoration, EditorView, keymap, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 
-const livePreview = ViewPlugin.fromClass(class {
-  decorations: DecorationSet;
-  constructor(readonly view: EditorView) { this.decorations = this.build(); }
-  update(update: ViewUpdate) {
-    if (update.docChanged || update.selectionSet || update.viewportChanged) this.decorations = this.build();
-  }
-  build(): DecorationSet {
-    const hidden: Range<Decoration>[] = [];
-    const styled: Range<Decoration>[] = [];
-    const activeLines = new Set(this.view.state.selection.ranges.map((range) => this.view.state.doc.lineAt(range.head).number));
-    const addMark = (from: number, to: number) => {
-      if (this.view.state.doc.lineAt(from).number === this.view.state.doc.lineAt(to).number && !activeLines.has(this.view.state.doc.lineAt(from).number)) {
-        hidden.push(Decoration.replace({}).range(from, to));
+const setHoveredLine = StateEffect.define<number | null>();
+const hoveredLine = StateField.define<number | null>({
+  create: () => null,
+  update(value, transaction) {
+    if (transaction.docChanged) return null;
+    for (const effect of transaction.effects) if (effect.is(setHoveredLine)) return effect.value;
+    return value;
+  },
+});
+
+const hide = Decoration.replace({});
+const headingTypes = new Set(["ATXHeading1", "ATXHeading2", "ATXHeading3", "ATXHeading4", "ATXHeading5", "ATXHeading6"]);
+
+function selectionTouches(state: EditorState, from: number, to: number): boolean {
+  return state.selection.ranges.some((range) => range.from <= to && range.to >= from);
+}
+
+function revealForPointerOrCaret(view: EditorView, from: number, to: number): boolean {
+  if (selectionTouches(view.state, from, to)) return true;
+  const hovered = view.state.field(hoveredLine);
+  if (hovered === null) return false;
+  return hovered >= view.state.doc.lineAt(from).number && hovered <= view.state.doc.lineAt(to).number;
+}
+
+function collectInline(view: EditorView): DecorationSet {
+  const ranges: { from: number; to: number; decoration: Decoration }[] = [];
+  const add = (from: number, to: number, decoration: Decoration) => {
+    if (from < to) ranges.push({ from, to, decoration });
+  };
+  for (const { from, to } of view.visibleRanges) {
+    syntaxTree(view.state).iterate({ from, to, enter(node) {
+      const name = node.type.name;
+      const raw = revealForPointerOrCaret(view, node.from, node.to);
+      if (headingTypes.has(name)) {
+        const mark = node.node.getChild("HeaderMark");
+        if (!mark) return;
+        const contentFrom = mark.to + (view.state.doc.sliceString(mark.to, mark.to + 1) === " " ? 1 : 0);
+        const level = name.slice(-1);
+        if (contentFrom < node.to) add(contentFrom, node.to, Decoration.mark({ class: `cm-live-heading-text cm-live-h${level}` }));
+        if (!raw && contentFrom < node.to) add(mark.from, contentFrom, hide);
+        return;
       }
-    };
-    for (const { from, to } of this.view.visibleRanges) {
-      syntaxTree(this.view.state).iterate({ from, to, enter: (node) => {
-        const name = node.type.name;
-        if (["ATXHeading1", "ATXHeading2", "ATXHeading3", "ATXHeading4", "ATXHeading5", "ATXHeading6", "SetextHeading1", "SetextHeading2"].includes(name)) {
-          const level = name.match(/Heading([1-6])/)?.[1] ?? "2";
-          styled.push(Decoration.line({ class: `cm-live-heading cm-live-heading-${level}` }).range(node.from));
-        } else if (name === "Emphasis") styled.push(Decoration.mark({ class: "cm-live-emphasis" }).range(node.from, node.to));
-        else if (name === "StrongEmphasis") styled.push(Decoration.mark({ class: "cm-live-strong" }).range(node.from, node.to));
-        else if (name === "InlineCode") styled.push(Decoration.mark({ class: "cm-live-code" }).range(node.from, node.to));
-        else if (name === "Link") styled.push(Decoration.mark({ class: "cm-live-link" }).range(node.from, node.to));
-        else if (name === "Blockquote") styled.push(Decoration.line({ class: "cm-live-quote" }).range(node.from));
-        else if (name === "ListItem") {
-          const marker = node.node.getChild("ListMark");
-          const markerText = marker ? this.view.state.doc.sliceString(marker.from, marker.to) : "•";
-          styled.push(Decoration.line({ class: "cm-live-list-item", attributes: { "data-marker": markerText } }).range(node.from));
+      if (name === "Emphasis" || name === "StrongEmphasis" || name === "Strikethrough") {
+        const marks = node.node.getChildren(name === "Strikethrough" ? "StrikethroughMark" : "EmphasisMark");
+        if (marks.length !== 2 || marks[0].to >= marks[1].from) return;
+        const cls = name === "StrongEmphasis" ? "cm-live-strong" : name === "Strikethrough" ? "cm-live-strike" : "cm-live-em";
+        add(marks[0].to, marks[1].from, Decoration.mark({ class: cls }));
+        if (!raw) { add(marks[0].from, marks[0].to, hide); add(marks[1].from, marks[1].to, hide); }
+        return;
+      }
+      if (name === "InlineCode") {
+        const marks = node.node.getChildren("CodeMark");
+        if (marks.length !== 2 || marks[0].to >= marks[1].from) return;
+        add(marks[0].to, marks[1].from, Decoration.mark({ class: "cm-live-code" }));
+        if (!raw) { add(marks[0].from, marks[0].to, hide); add(marks[1].from, marks[1].to, hide); }
+        return;
+      }
+      if (name === "Link") {
+        const marks = node.node.getChildren("LinkMark");
+        const url = node.node.getChild("URL");
+        if (marks.length < 2 || marks[0].to >= marks[1].from) return;
+        add(marks[0].to, marks[1].from, Decoration.mark({ class: "cm-live-link" }));
+        if (!raw) {
+          add(marks[0].from, marks[0].to, hide);
+          add(marks[1].from, Math.min(node.to, url ? url.to + 1 : marks[1].to), hide);
         }
-        if (name === "URL" && node.node.parent?.name === "Link") addMark(node.from, node.to);
-        if (["HeaderMark", "QuoteMark", "ListMark", "LinkMark", "EmphasisMark", "CodeMark"].includes(name)) addMark(node.from, node.to);
-      }});
+        return;
+      }
+      if (name === "Blockquote") {
+        add(node.from, node.to, Decoration.mark({ class: "cm-live-quote-text" }));
+        const mark = node.node.getChild("QuoteMark");
+        if (mark && !raw) add(mark.from, mark.to, hide);
+        return;
+      }
+      if (name === "ListItem") {
+        if (node.node.getChild("Task")) return;
+        const mark = node.node.getChild("ListMark");
+        if (mark && !raw) add(mark.from, mark.to, Decoration.replace({ widget: new ListMarker(view.state.doc.sliceString(mark.from, mark.to)) }));
+        return;
+      }
+      if (name === "FencedCode" && !raw) {
+        const marks = node.node.getChildren("CodeMark");
+        if (marks.length >= 2) {
+          const openEnd = view.state.doc.lineAt(marks[0].from).to;
+          const closeStart = view.state.doc.lineAt(marks[marks.length - 1].from).from;
+          add(marks[0].from, Math.min(openEnd, node.to), hide);
+          add(closeStart, marks[marks.length - 1].to, hide);
+        }
+      }
+    }});
+  }
+  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  const builder = new RangeSetBuilder<Decoration>();
+  for (const range of ranges) builder.add(range.from, range.to, range.decoration);
+  return builder.finish();
+}
+
+class ListMarker extends WidgetType {
+  constructor(readonly marker: string) { super(); }
+  eq(other: ListMarker) { return other.marker === this.marker; }
+  toDOM() {
+    const marker = document.createElement("span");
+    marker.className = "cm-live-list-marker";
+    marker.textContent = /^\d/.test(this.marker) ? this.marker : "•";
+    return marker;
+  }
+}
+
+const inlineLivePreview = ViewPlugin.fromClass(class {
+  decorations: DecorationSet;
+  constructor(readonly view: EditorView) { this.decorations = collectInline(view); }
+  update(update: ViewUpdate) {
+    if (update.docChanged || update.selectionSet || update.viewportChanged || update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(setHoveredLine)))) {
+      this.decorations = collectInline(update.view);
     }
-    hidden.sort((a, b) => a.from - b.from || a.to - b.to);
-    styled.sort((a, b) => a.from - b.from || a.to - b.to);
-    return Decoration.set([...styled, ...hidden], true);
   }
 }, { decorations: (plugin) => plugin.decorations });
 
-export function MarkdownCodeEditor({ value, onChange, mode = "live", onNavigateReady }: { value: string; onChange: (value: string) => void; mode?: "live" | "source" | "read"; onNavigateReady?: (navigate: ((line: number) => void) | null) => void }) {
+const blockLivePreview = ViewPlugin.fromClass(class {
+  decorations: DecorationSet;
+  constructor(readonly view: EditorView) { this.decorations = this.build(); }
+  update(update: ViewUpdate) {
+    if (update.docChanged || update.selectionSet || update.viewportChanged || update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(setHoveredLine)))) this.decorations = this.build();
+  }
+  build() {
+    const builder = new RangeSetBuilder<Decoration>();
+    const lines = new Map<number, string>();
+    const addClass = (from: number, className: string) => lines.set(from, `${lines.get(from) ?? ""} ${className}`.trim());
+    const view = this.view;
+    for (const range of view.visibleRanges) syntaxTree(view.state).iterate({ from: range.from, to: range.to, enter(node) {
+      if (node.type.name === "Blockquote") {
+        for (const mark of node.node.getChildren("QuoteMark")) addClass(view.state.doc.lineAt(mark.from).from, "cm-live-quote-line");
+      }
+      if (node.type.name === "FencedCode") {
+        const start = view.state.doc.lineAt(node.from).number;
+        const end = view.state.doc.lineAt(node.to).number;
+        for (let number = start; number <= end; number++) addClass(view.state.doc.line(number).from, "cm-live-code-line");
+      }
+    }});
+    for (const [from, className] of [...lines].sort(([a], [b]) => a - b)) builder.add(from, from, Decoration.line({ class: className }));
+    return builder.finish();
+  }
+}, { decorations: (plugin) => plugin.decorations });
+
+const pointerTracking: Extension = EditorView.domEventHandlers({
+  mousemove(event, view) {
+    const position = view.posAtCoords({ x: event.clientX, y: event.clientY });
+    const line = position === null ? null : view.state.doc.lineAt(position).number;
+    if (view.state.field(hoveredLine) !== line) view.dispatch({ effects: setHoveredLine.of(line) });
+    return false;
+  },
+  mouseleave(_event, view) {
+    if (view.state.field(hoveredLine) !== null) view.dispatch({ effects: setHoveredLine.of(null) });
+    return false;
+  },
+});
+
+export function MarkdownCodeEditor({ value, onChange, onNavigateReady }: { value: string; onChange: (value: string) => void; onNavigateReady?: (navigate: ((line: number) => void) | null) => void }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
-  const modeCompartment = useRef(new Compartment());
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
@@ -59,7 +174,7 @@ export function MarkdownCodeEditor({ value, onChange, mode = "live", onNavigateR
       doc: value,
       extensions: [
         markdown(), history(), indentOnInput(), syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-        modeCompartment.current.of(mode === "live" ? livePreview : []),
+        hoveredLine, inlineLivePreview, blockLivePreview, pointerTracking,
         keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]), EditorView.lineWrapping,
         EditorView.contentAttributes.of({ "aria-label": "Markdown editor", autocapitalize: "sentences", spellcheck: "true" }),
         EditorView.updateListener.of((update) => { if (update.docChanged) onChangeRef.current(update.state.doc.toString()); }),
@@ -78,10 +193,6 @@ export function MarkdownCodeEditor({ value, onChange, mode = "live", onNavigateR
     view.current = editor;
     return () => { view.current = null; editor.destroy(); };
   }, []);
-
-  useEffect(() => {
-    view.current?.dispatch({ effects: modeCompartment.current.reconfigure(mode === "live" ? livePreview : []) });
-  }, [mode]);
 
   useEffect(() => {
     if (!view.current || !onNavigateReady) return;

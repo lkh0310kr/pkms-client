@@ -1,8 +1,6 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { IndexeddbPersistence } from "y-indexeddb";
 import * as Y from "yjs";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { useSearchParams } from "react-router";
 import type { Route } from "./+types/home";
 
@@ -100,7 +98,6 @@ export default function Home() {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => new Set([""]));
   const [loadedFolders, setLoadedFolders] = useState<Set<string>>(() => new Set());
   const [focusedTreePath, setFocusedTreePath] = useState<string | null>(null);
-  const [editorMode, setEditorMode] = useState<"live" | "source" | "read">("live");
   const [showHiddenFiles, setShowHiddenFiles] = useState(false);
   const [excludedPatterns, setExcludedPatterns] = useState("");
   const [showFileFilters, setShowFileFilters] = useState(false);
@@ -709,7 +706,7 @@ export default function Home() {
       <aside className="sidebar">
         <div className="sidebar-top">
           <div className="brand-lockup"><div className="brand-mark small">P</div><span>PKMS</span></div>
-          <button className="icon-button" title="Add repository" onClick={openRepositoryPicker}>＋</button>
+          <button className="icon-button" title="Add repository" onClick={openRepositoryPicker}><AppIcon name="plus" /></button>
         </div>
         <div className="workspace-select">
           <span className="eyebrow">WORKSPACE</span>
@@ -719,14 +716,14 @@ export default function Home() {
         </div>
         {activeWorkspace && <>
           <div className="file-toolbar"><span className="eyebrow">FILES</span><div className="toolbar-actions">
-            <button className={`mini-button visibility-button${showFileFilters ? " active" : ""}`} title="File visibility settings" aria-label="File visibility settings" aria-expanded={showFileFilters} onClick={() => setShowFileFilters((open) => !open)}>◉</button>
-            <button className="mini-button" title="New note" onClick={newNote}>＋</button>
-            <button className="mini-button" title="New folder" onClick={newFolder}>▱</button>
-            <label className="mini-button upload-button" title="Upload file">↑<input type="file" onChange={(event) => { void uploadFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
-            {activeFile && <button className="mini-button" title="Rename" onClick={renameActiveFile}>✎</button>}
-            {activeFile && <button className="mini-button" title="Delete" onClick={() => void deleteActiveFile()}>×</button>}
-            {!activeFile && currentFolder && <button className="mini-button" title="Rename folder" onClick={renameCurrentFolder}>✎</button>}
-            {!activeFile && currentFolder && <button className="mini-button" title="Delete folder" onClick={() => void deleteCurrentFolder()}>×</button>}
+            <button className={`mini-button visibility-button${showFileFilters ? " active" : ""}`} title="File visibility settings" aria-label="File visibility settings" aria-expanded={showFileFilters} onClick={() => setShowFileFilters((open) => !open)}><AppIcon name="filter" /></button>
+            <button className="mini-button" title="New note" onClick={newNote}><AppIcon name="filePlus" /></button>
+            <button className="mini-button" title="New folder" onClick={newFolder}><AppIcon name="folderPlus" /></button>
+            <label className="mini-button upload-button" title="Upload file"><AppIcon name="upload" /><input type="file" onChange={(event) => { void uploadFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
+            {activeFile && <button className="mini-button" title="Rename" onClick={renameActiveFile}><AppIcon name="pencil" /></button>}
+            {activeFile && <button className="mini-button" title="Delete" onClick={() => void deleteActiveFile()}><AppIcon name="trash" /></button>}
+            {!activeFile && currentFolder && <button className="mini-button" title="Rename folder" onClick={renameCurrentFolder}><AppIcon name="pencil" /></button>}
+            {!activeFile && currentFolder && <button className="mini-button" title="Delete folder" onClick={() => void deleteCurrentFolder()}><AppIcon name="trash" /></button>}
           </div></div>
           {showFileFilters && <div className="file-filter-panel"><div className="file-filter-heading"><span>Show hidden files</span><button className={`mini-button visibility-button${showHiddenFiles ? " active" : ""}`} aria-pressed={showHiddenFiles} onClick={() => { const next = !showHiddenFiles; setShowHiddenFiles(next); localStorage.setItem(`pkms:show-hidden:${activeWorkspace.id}`, String(next)); }}>{showHiddenFiles ? "On" : "Off"}</button></div><label htmlFor="excluded-files">Exclude paths</label><textarea id="excluded-files" value={excludedPatterns} placeholder={"*.tmp\n**/drafts/**"} spellCheck={false} onChange={(event) => { const next = event.target.value; setExcludedPatterns(next); localStorage.setItem(`pkms:excluded-files:${activeWorkspace.id}`, next); }} /><p>One glob per line</p></div>}
           <nav ref={treeRef} className="file-list file-tree" role="tree" aria-label="Repository files" aria-busy={loadingFolder} onKeyDown={handleTreeKeyDown} onScroll={(event) => persistTreeScroll(event.currentTarget.scrollTop)}>
@@ -743,8 +740,8 @@ export default function Home() {
               onFocus={() => setFocusedTreePath(file.path)}
               onClick={() => file.kind === "folder" ? void toggleFolder(file) : void openFile(file)}
             >
-              <span className="tree-chevron" aria-hidden="true">{file.kind === "folder" ? expandedFolders.has(file.path) ? "▾" : "▸" : ""}</span>
-              <span className="file-icon" aria-hidden="true">{file.kind === "folder" ? "▰" : file.kind === "markdown" ? "▤" : "◇"}</span>
+              <span className={`tree-chevron${expandedFolders.has(file.path) ? " expanded" : ""}`} aria-hidden="true">{file.kind === "folder" && <AppIcon name="chevron" />}</span>
+              <span className="file-icon" aria-hidden="true"><AppIcon name={file.kind === "folder" ? "folder" : file.kind === "markdown" ? "fileText" : "file"} /></span>
               <span className="tree-label">{entryName(file.path)}</span>
             </button>)}
             {!treeRows.length && <p className="empty-hint">{loadingFolder ? "Loading…" : "Empty folder"}</p>}
@@ -752,7 +749,7 @@ export default function Home() {
         </>}
         <div className="sidebar-bottom">
           <div className={`sync-indicator ${sync.githubStatus}`}><span className="status-dot" /><span>{sync.githubStatus === "synced" ? "Synced" : sync.githubStatus === "pending" ? "Saving" : sync.githubStatus === "external-change" ? "GitHub changed" : "Sync error"}</span></div>
-          <div className="account-row"><img src={user.avatarUrl} alt="" /><span>@{user.login}</span><button className="icon-button logout-button" title="Sign out" onClick={() => void api("/api/logout", { method: "POST" }).then(() => window.location.reload())}>↪</button></div>
+          <div className="account-row"><img src={user.avatarUrl} alt="" /><span>@{user.login}</span><button className="icon-button logout-button" title="Sign out" onClick={() => void api("/api/logout", { method: "POST" }).then(() => window.location.reload())}><AppIcon name="logout" /></button></div>
         </div>
       </aside>
 
@@ -760,26 +757,50 @@ export default function Home() {
         <header className="topbar">
           <div className="breadcrumbs"><span>{activeWorkspace?.repository ?? "No workspace"}</span>{(activeFile || currentFolder) && <><span className="crumb-slash">/</span><span>{activeFile?.path ?? currentFolder}</span></>}</div>
           <div className="topbar-right">
-            <button className="mobile-explorer-toggle" onClick={() => setMobileExplorerOpen((open) => !open)} aria-expanded={mobileExplorerOpen} title="Toggle file tree">☰ Files</button>
+            <button className="mobile-explorer-toggle" onClick={() => setMobileExplorerOpen((open) => !open)} aria-expanded={mobileExplorerOpen} title="Toggle file tree"><AppIcon name="menu" /> Files</button>
             <span className={`save-label ${saving ? "active" : ""}`}><span className="status-dot" />{saving ? "Saving" : notice || (sync.githubStatus === "synced" ? "Synced" : "Saved")}</span>
             {peers.length > 1 && <div className="collaborators" aria-label="Collaborators"><span>{peers.length} here</span></div>}
           </div>
         </header>
-        {!!openTabs.length && <nav className="document-tabs" aria-label="Open documents">{openTabs.map((file) => <div key={file.id} className={`document-tab${activeFile?.id === file.id ? " active" : ""}`}><button className="document-tab-label" onClick={() => void openFile(file)} title={file.path}>{entryName(file.path)}</button><button className="document-tab-close" onClick={() => closeTab(file)} aria-label={`Close ${entryName(file.path)}`}>×</button></div>)}</nav>}
-        {error && <button className="notice error dismissible" onClick={() => setError("")}>{error}<span>×</span></button>}
+        {!!openTabs.length && <nav className="document-tabs" aria-label="Open documents">{openTabs.map((file) => <div key={file.id} className={`document-tab${activeFile?.id === file.id ? " active" : ""}`}><button className="document-tab-label" onClick={() => void openFile(file)} title={file.path}>{entryName(file.path)}</button><button className="document-tab-close" onClick={() => closeTab(file)} aria-label={`Close ${entryName(file.path)}`}><AppIcon name="close" /></button></div>)}</nav>}
+        {error && <button className="notice error dismissible" onClick={() => setError("")}>{error}<AppIcon name="close" /></button>}
         {showRepositories && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowRepositories(false); }}><section className="repository-modal">
-          <button className="modal-close" onClick={() => setShowRepositories(false)}>×</button><span className="eyebrow">GITHUB</span><h2>Choose a repository</h2>
-          <div className="repository-list">{repositories.map((repository) => <button key={repository.fullName} className="repository-option" onClick={() => void connectRepository(repository)}><span className="repo-icon">{repository.private ? "◈" : "◇"}</span><span><strong>{repository.fullName}</strong><small>{repository.defaultBranch} · {repository.private ? "Private" : "Public"}</small></span><span className="option-arrow">→</span></button>)}{!repositories.length && <p className="empty-hint">No writable repositories found.</p>}</div>
+          <button className="modal-close" onClick={() => setShowRepositories(false)} aria-label="Close"><AppIcon name="close" /></button><span className="eyebrow">GITHUB</span><h2>Choose a repository</h2>
+          <div className="repository-list">{repositories.map((repository) => <button key={repository.fullName} className="repository-option" onClick={() => void connectRepository(repository)}><span className="repo-icon"><AppIcon name={repository.private ? "lock" : "folder"} /></span><span><strong>{repository.fullName}</strong><small>{repository.defaultBranch} · {repository.private ? "Private" : "Public"}</small></span><span className="option-arrow"><AppIcon name="arrowRight" /></span></button>)}{!repositories.length && <p className="empty-hint">No writable repositories found.</p>}</div>
         </section></div>}
         {quickOpen && <div className="modal-backdrop quick-open-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickOpen(false); }}><section className="quick-open-modal" role="dialog" aria-modal="true" aria-label="Quick open"><input ref={quickOpenInput} value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} placeholder="Search open and loaded files…" onKeyDown={(event) => { if (event.key === "Escape") setQuickOpen(false); else if (event.key === "Enter" && quickOpenResults[0]) { void openFile(quickOpenResults[0]); setQuickOpen(false); } }} /><div className="quick-open-results">{quickOpenResults.map((file) => <button key={file.id} onClick={() => { void openFile(file); setQuickOpen(false); }}><span>{entryName(file.path)}</span><small>{file.path}</small></button>)}{!quickOpenResults.length && <p className="empty-hint">No loaded files found</p>}</div></section></div>}
         {!activeWorkspace ? <div className="empty-workspace"><h2>No workspace</h2><button className="primary-button" onClick={openRepositoryPicker}>Connect repository</button></div> : !activeFile ? <div className="empty-workspace"><h2>No file open</h2><button className="primary-button" onClick={newNote}>New note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout">
-          <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div><div className="editor-controls"><div className="outline-control"><button className={`mini-button outline-button${outlineOpen ? " active" : ""}`} title="Note outline" aria-label="Note outline" aria-expanded={outlineOpen} onClick={() => setOutlineOpen((open) => !open)}>☷</button>{outlineOpen && <div className="outline-popover" role="navigation" aria-label="Note outline">{outlineItems.length ? outlineItems.map((item) => <button key={`${item.line}-${item.title}`} style={{ paddingLeft: 8 + (item.level - 1) * 11 }} title={item.title} onClick={() => { setEditorMode("live"); setOutlineOpen(false); requestAnimationFrame(() => editorNavigate.current?.(item.line)); }}>{item.title}</button>) : <span>No headings</span>}</div>}</div><label className="editor-mode-select"><span className="sr-only">Editor view</span><select value={editorMode} onChange={(event) => setEditorMode(event.target.value as "live" | "source" | "read")}><option value="live">Live</option><option value="source">Source</option><option value="read">Read</option></select><span aria-hidden="true">{editorMode === "source" ? "Source" : editorMode === "read" ? "Read" : "Live"}⌄</span></label><button className="save-button" onClick={saveActiveFileNow} title="Save now (⌘S / Ctrl+S)">Save</button></div></div>
-          <div className={`editor-columns mode-${editorMode}`}><div className="source-column"><div className="column-label">SOURCE</div><Suspense fallback={<div className="editor-loading">Opening editor…</div>}><MarkdownCodeEditor key={activeFile.id} value={text} onChange={handleText} mode={editorMode} onNavigateReady={registerEditorNavigator} /></Suspense></div><div className="preview-column"><article className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></article></div></div>
-        </div> : <div className="asset-view"><div className="file-icon large">◇</div><h2>{activeFile.path.split("/").at(-1)}</h2><p>{activeFile.size ? `${(activeFile.size / 1024).toFixed(1)} KB` : "Attachment"}</p><a className="primary-button" href={`/api/workspaces/${activeWorkspace.id}/assets/${activeFile.id}`} target="_blank" rel="noreferrer">Open file</a></div>}
+          <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div><div className="editor-controls"><div className="outline-control"><button className={`mini-button outline-button${outlineOpen ? " active" : ""}`} title="Note outline" aria-label="Note outline" aria-expanded={outlineOpen} onClick={() => setOutlineOpen((open) => !open)}><AppIcon name="list" /></button>{outlineOpen && <div className="outline-popover" role="navigation" aria-label="Note outline">{outlineItems.length ? outlineItems.map((item) => <button key={`${item.line}-${item.title}`} style={{ paddingLeft: 8 + (item.level - 1) * 11 }} title={item.title} onClick={() => { setOutlineOpen(false); requestAnimationFrame(() => editorNavigate.current?.(item.line)); }}>{item.title}</button>) : <span>No headings</span>}</div>}</div><button className="save-button" onClick={saveActiveFileNow} title="Save now (⌘S / Ctrl+S)">Save</button></div></div>
+          <div className="editor-columns"><div className="source-column"><Suspense fallback={<div className="editor-loading">Opening editor…</div>}><MarkdownCodeEditor key={activeFile.id} value={text} onChange={handleText} onNavigateReady={registerEditorNavigator} /></Suspense></div></div>
+        </div> : <div className="asset-view"><div className="file-icon large"><AppIcon name="file" /></div><h2>{activeFile.path.split("/").at(-1)}</h2><p>{activeFile.size ? `${(activeFile.size / 1024).toFixed(1)} KB` : "Attachment"}</p><a className="primary-button" href={`/api/workspaces/${activeWorkspace.id}/assets/${activeFile.id}`} target="_blank" rel="noreferrer">Open file</a></div>}
         {sync.githubStatus === "external-change" && <div className="external-warning"><strong>GitHub branch changed outside PKMS.</strong><span>PKMS paused its commit so it won’t overwrite that change. {sync.message}</span></div>}
       </section>
     </main>
   );
+}
+
+type AppIconName = "plus" | "filter" | "filePlus" | "folderPlus" | "upload" | "pencil" | "trash" | "folder" | "fileText" | "file" | "chevron" | "logout" | "menu" | "lock" | "arrowRight" | "list" | "close";
+function AppIcon({ name, className = "" }: { name: AppIconName; className?: string }) {
+  const path = {
+    plus: <path d="M12 5v14M5 12h14" />,
+    filter: <path d="M4 5h16l-6.5 7.3V19l-3 1.5v-8.2L4 5Z" />,
+    filePlus: <><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h7M13 3v6h6M13 3l6 6" /><path d="M17 14v7m-3.5-3.5h7" /></>,
+    folderPlus: <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v3M3 7v11a2 2 0 0 0 2 2h8" /><path d="M18 14v7m-3.5-3.5h7" /></>,
+    upload: <><path d="M12 16V4m-4 4 4-4 4 4" /><path d="M5 14v5h14v-5" /></>,
+    pencil: <><path d="m4 16.5-.8 4.3 4.3-.8L19 8.5 15.5 5 4 16.5Z" /><path d="m13.8 6.7 3.5 3.5" /></>,
+    trash: <><path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3" /></>,
+    folder: <path d="M3 6.5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-11Z" />,
+    fileText: <><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-7-6Z" /><path d="M13 3v6h7M8 13h8m-8 4h8" /></>,
+    file: <><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-7-6Z" /><path d="M13 3v6h7" /></>,
+    chevron: <path d="m9 18 6-6-6-6" />,
+    logout: <><path d="M10 17l5-5-5-5m5 5H3" /><path d="M13 4h5a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-5" /></>,
+    menu: <><path d="M4 6h16M4 12h16M4 18h16" /></>,
+    lock: <><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2" /></>,
+    arrowRight: <><path d="M4 12h15m-6-6 6 6-6 6" /></>,
+    list: <><path d="M9 6h11M9 12h11M9 18h11" /><path d="M4 6h.01M4 12h.01M4 18h.01" /></>,
+    close: <path d="m6 6 12 12M18 6 6 18" />,
+  } satisfies Record<AppIconName, ReactNode>;
+  return <svg className={`app-icon ${className}`} viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{path[name]}</svg>;
 }
 
 function GitHubIcon() {
