@@ -14,6 +14,7 @@ interface FileRow {
   file_id: string; path: string; kind: string; content: string | null; object_key: string | null;
   size: number; sha: string | null; previous_path: string | null; revision: number; deleted: number; dirty: number;
 }
+interface ImportRow { [key: string]: SqlStorageValue; ordinal: number; path: string; sha: string; size: number; mode: string }
 interface RefResponse { object: { sha: string } }
 interface TreeResponse { sha: string; tree: Array<{ path: string; mode: string; type: string; sha: string; size?: number }>; truncated: boolean }
 
@@ -58,6 +59,7 @@ export class VaultRoom extends DurableObject<Env> {
       );
       CREATE TABLE IF NOT EXISTS documents (file_id TEXT PRIMARY KEY, state_update BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS operations (operation_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, result TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS import_entries (ordinal INTEGER PRIMARY KEY, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, imported INTEGER NOT NULL DEFAULT 0);
       CREATE UNIQUE INDEX IF NOT EXISTS active_file_paths ON files (path) WHERE deleted = 0;
     `);
   }
@@ -110,69 +112,97 @@ export class VaultRoom extends DurableObject<Env> {
     if (!body.accountLogin) return json({ error: "github_account_required" }, { status: 400 });
     if (this.getMeta("repository")) {
       this.setMeta("accountLogin", body.accountLogin);
-      return json({ ok: true, alreadyInitialized: true });
+      if (this.getMeta("importState") === "running") return json({ ok: true, importPending: true });
+      if (this.getMeta("importState") === "failed") {
+        this.setMeta("importState", "running");
+        this.setMeta("githubStatus", "importing");
+        this.setMeta("githubMessage", "");
+        return json({ ok: true, importPending: true });
+      }
+      return json({ ok: true, alreadyInitialized: true, importPending: false });
     }
     const [owner, repo] = body.repository.split("/");
     if (!owner || !repo || body.repository.split("/").length !== 2) return json({ error: "invalid_repository" }, { status: 400 });
     this.setMeta("accountLogin", body.accountLogin);
-    try {
-      const token = await this.token();
-      const refPath = `/repos/${owner}/${repo}/git/ref/heads/${body.branch.split("/").map(encodeURIComponent).join("/")}`;
-      const ref = await (await this.github(token, refPath)).json() as RefResponse;
-      const commit = await (await this.github(token, `/repos/${owner}/${repo}/git/commits/${ref.object.sha}`)).json() as { tree: { sha: string } };
-      const tree = await (await this.github(token, `/repos/${owner}/${repo}/git/trees/${commit.tree.sha}?recursive=1`)).json() as TreeResponse;
-      if (tree.truncated) return json({ error: "repository_tree_too_large" }, { status: 413 });
-      for (const entry of tree.tree) {
-        if (entry.type !== "blob" || !["100644", "100755"].includes(entry.mode)) continue;
-        if (!validPath(entry.path)) continue;
-        const size = entry.size;
-        if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) throw new Error("GitHub did not provide a valid repository file size.");
-        if (size > MAX_GIT_FILE_BYTES) throw new Error("A repository file exceeds the PKMS 50 MiB file limit.");
-        if (isMarkdown(entry.path) && size > MAX_MARKDOWN_BYTES) throw new Error("A Markdown file exceeds the PKMS 512 KiB file limit.");
-        const fileId = await this.stableFileId(body.repository, entry.path);
-        this.ensureParents(entry.path, false);
-        const markdown = isMarkdown(entry.path);
-        let content: string | null = null;
-        let objectKey: string | null = null;
-        if (markdown) {
-          const response = await this.github(token, `/repos/${owner}/${repo}/git/blobs/${entry.sha}`, { headers: { Accept: "application/vnd.github.raw+json" } });
-          const raw = await response.arrayBuffer();
-          if (raw.byteLength !== size) throw new Error("GitHub returned a file with an unexpected size.");
-          content = new TextDecoder("utf-8", { fatal: true }).decode(raw);
-          const doc = new Y.Doc({ guid: fileId });
-          doc.getText("markdown").insert(0, content);
-          this.saveDocument(fileId, Y.encodeStateAsUpdate(doc));
-        } else {
-          objectKey = `${this.ctx.id.toString()}/${fileId}`;
-          const response = await this.github(token, `/repos/${owner}/${repo}/git/blobs/${entry.sha}`, { headers: { Accept: "application/vnd.github.raw+json" } });
-          if (!response.body) {
-            const raw = await response.arrayBuffer();
-            if (raw.byteLength !== size) throw new Error("GitHub returned a file with an unexpected size.");
-            await this.env.ASSET_BUCKET.put(objectKey, raw);
-          } else {
-            const fixed = new FixedLengthStream(size);
-            const upload = this.env.ASSET_BUCKET.put(objectKey, fixed.readable);
-            const transfer = response.body.pipeTo(fixed.writable);
-            await Promise.all([upload, transfer]);
-          }
-        }
-        this.ctx.storage.sql.exec(
-          "INSERT OR IGNORE INTO files (file_id,path,kind,content,object_key,size,sha,revision,deleted,dirty) VALUES (?,?,?,?,?,?,?,?,0,0)",
-          fileId, entry.path, markdown ? "markdown" : "asset", content, objectKey, entry.size ?? 0, entry.sha, 0
-        );
-      }
-      this.setMeta("repository", body.repository);
-      this.setMeta("branch", body.branch);
-      this.setMeta("head", ref.object.sha);
-      this.setMeta("tree", commit.tree.sha);
-      this.setMeta("revision", "0");
-      this.setMeta("githubStatus", "synced");
-      return json({ ok: true, head: ref.object.sha });
-    } catch (error) {
-      this.setMeta("githubStatus", "failed");
-      this.setMeta("githubMessage", error instanceof Error ? error.message : "initial import failed");
-      return json({ error: "github_import_failed", message: this.getMeta("githubMessage") }, { status: 502 });
+    const token = await this.token();
+    const refPath = `/repos/${owner}/${repo}/git/ref/heads/${body.branch.split("/").map(encodeURIComponent).join("/")}`;
+    const ref = await (await this.github(token, refPath)).json() as RefResponse;
+    const commit = await (await this.github(token, `/repos/${owner}/${repo}/git/commits/${ref.object.sha}`)).json() as { tree: { sha: string } };
+    const tree = await (await this.github(token, `/repos/${owner}/${repo}/git/trees/${commit.tree.sha}?recursive=1`)).json() as TreeResponse;
+    if (tree.truncated) return json({ error: "repository_tree_too_large" }, { status: 413 });
+    this.ctx.storage.sql.exec("DELETE FROM import_entries");
+    let ordinal = 0;
+    for (const entry of tree.tree) {
+      if (entry.type !== "blob" || !["100644", "100755"].includes(entry.mode) || !validPath(entry.path)) continue;
+      const size = entry.size;
+      if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) throw new Error("GitHub did not provide a valid repository file size.");
+      if (size > MAX_GIT_FILE_BYTES || (isMarkdown(entry.path) && size > MAX_MARKDOWN_BYTES)) throw new Error("A repository file exceeds the PKMS import size limit.");
+      this.ctx.storage.sql.exec("INSERT INTO import_entries (ordinal,path,sha,size,mode,imported) VALUES (?,?,?,?,?,0)", ordinal++, entry.path, entry.sha, size, entry.mode);
     }
+    this.setMeta("repository", body.repository);
+    this.setMeta("branch", body.branch);
+    this.setMeta("head", ref.object.sha);
+    this.setMeta("tree", commit.tree.sha);
+    this.setMeta("revision", "0");
+    this.setMeta("importState", ordinal ? "running" : "complete");
+    this.setMeta("importTotal", String(ordinal));
+    this.setMeta("importCompleted", "0");
+    this.setMeta("githubStatus", ordinal ? "importing" : "synced");
+    this.setMeta("githubMessage", "");
+    return json({ ok: true, importPending: ordinal > 0 });
+  }
+
+  private async importBatch(): Promise<Response> {
+    if (this.getMeta("importState") !== "running") return json({ done: true });
+    const repository = this.getMeta("repository");
+    if (!repository) return json({ error: "workspace_not_initialized" }, { status: 409 });
+    const [owner, repo] = repository.split("/");
+    const token = await this.token();
+    const rows = this.ctx.storage.sql.exec<ImportRow>("SELECT ordinal,path,sha,size,mode FROM import_entries WHERE imported = 0 ORDER BY ordinal LIMIT 40").toArray();
+    for (const entry of rows) {
+      const fileId = await this.stableFileId(repository, entry.path);
+      this.ensureParents(entry.path, false);
+      const markdown = isMarkdown(entry.path);
+      let content: string | null = null;
+      let objectKey: string | null = null;
+      const response = await this.github(token, `/repos/${owner}/${repo}/git/blobs/${entry.sha}`, { headers: { Accept: "application/vnd.github.raw+json" } });
+      if (markdown) {
+        const raw = await response.arrayBuffer();
+        if (raw.byteLength !== entry.size) throw new Error("GitHub returned a file with an unexpected size.");
+        content = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+        const doc = new Y.Doc({ guid: fileId });
+        doc.getText("markdown").insert(0, content);
+        this.saveDocument(fileId, Y.encodeStateAsUpdate(doc));
+      } else {
+        objectKey = `${this.ctx.id.toString()}/${fileId}`;
+        if (!response.body) {
+          const raw = await response.arrayBuffer();
+          if (raw.byteLength !== entry.size) throw new Error("GitHub returned a file with an unexpected size.");
+          await this.env.ASSET_BUCKET.put(objectKey, raw);
+        } else {
+          const fixed = new FixedLengthStream(entry.size);
+          const upload = this.env.ASSET_BUCKET.put(objectKey, fixed.readable);
+          const transfer = response.body.pipeTo(fixed.writable);
+          await Promise.all([upload, transfer]);
+        }
+      }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO files (file_id,path,kind,content,object_key,size,sha,revision,deleted,dirty) VALUES (?,?,?,?,?,?,?,?,0,0) ON CONFLICT(file_id) DO UPDATE SET path=excluded.path,kind=excluded.kind,content=excluded.content,object_key=excluded.object_key,size=excluded.size,sha=excluded.sha,revision=0,deleted=0,dirty=0",
+        fileId, entry.path, markdown ? "markdown" : "asset", content, objectKey, entry.size, entry.sha, 0
+      );
+      this.ctx.storage.sql.exec("UPDATE import_entries SET imported = 1 WHERE ordinal = ?", entry.ordinal);
+    }
+    const remaining = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM import_entries WHERE imported = 0").toArray()[0]?.count ?? 0;
+    const completed = Number(this.getMeta("importTotal") ?? "0") - remaining;
+    this.setMeta("importCompleted", String(completed));
+    if (remaining === 0) {
+      this.setMeta("importState", "complete");
+      this.setMeta("githubStatus", "synced");
+      this.setMeta("githubMessage", "");
+      this.ctx.storage.sql.exec("DELETE FROM import_entries");
+      return json({ done: true });
+    }
+    return json({ done: false, completed, total: Number(this.getMeta("importTotal") ?? "0") });
   }
 
   private async stableFileId(repository: string, path: string): Promise<string> {
@@ -212,9 +242,11 @@ export class VaultRoom extends DurableObject<Env> {
     const url = new URL(request.url);
     try {
       if (url.pathname === "/initialize" && request.method === "POST") return this.initialize(await request.json() as { repository: string; branch: string; accountLogin: string });
+      if (url.pathname === "/import-batch" && request.method === "POST") return this.importBatch();
       if (!this.getMeta("repository")) return json({ error: "workspace_not_initialized" }, { status: 409 });
       if (url.pathname === "/snapshot" && request.method === "GET") return this.snapshot(url);
       if (url.pathname === "/sync-status" && request.method === "GET") return json(await this.syncStatus());
+      if (this.getMeta("importState") === "running") return json({ error: "workspace_importing" }, { status: 409 });
       if (url.pathname === "/flush" && request.method === "POST") {
         await this.ctx.storage.deleteAlarm();
         await this.flushGitHub();
@@ -235,12 +267,20 @@ export class VaultRoom extends DurableObject<Env> {
       if (url.pathname === "/upload" && request.method === "POST") return this.upload(request);
       return json({ error: "not_found" }, { status: 404 });
     } catch (error) {
+      if (url.pathname === "/initialize" || url.pathname === "/import-batch") {
+        this.setMeta("importState", "failed");
+        this.setMeta("githubStatus", "failed");
+        this.setMeta("githubMessage", "Repository import failed. Retry the connection.");
+        console.error(JSON.stringify({ event: "github_import_failed", errorType: error instanceof Error ? error.name : "unknown" }));
+        return json({ error: "github_import_failed", message: "Repository import failed. Retry the connection." }, { status: 502 });
+      }
       return json({ error: "internal_error", message: error instanceof Error ? error.message : "Unexpected error" }, { status: 500 });
     }
   }
 
   private snapshot(url: URL): Response {
     const revision = Number(this.getMeta("revision") ?? "0");
+    if (this.getMeta("importState") === "running") return json({ workspaceId: this.ctx.id.toString(), revision, files: [], hasMore: false, nextRevision: revision, afterRevision: Number(url.searchParams.get("afterRevision") ?? 0) });
     const files = this.files().map((file) => ({
       id: file.file_id, path: file.path, kind: file.kind, revision: file.revision,
       ...(file.kind === "markdown" ? { content: file.content ?? "" } : { contentType: "application/octet-stream", size: file.size }),

@@ -267,7 +267,7 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
     const id = await makeWorkspaceId(auth.login, repo.full_name, branch);
     const record: WorkspaceRecord = { id, repository: repo.full_name, branch, githubStatus: "pending", revision: 0 };
     const room = env.VAULT_ROOMS.get(env.VAULT_ROOMS.idFromName(id));
-    const initialized = await room.fetch("https://room/initialize", {
+    let initialized = await room.fetch("https://room/initialize", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         repository: repo.full_name,
@@ -276,6 +276,16 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
       }),
     });
     if (!initialized.ok) return initialized;
+    let importState = await initialized.json() as { importPending?: boolean };
+    // Each Durable Object invocation gets a fresh GitHub subrequest budget. Keep
+    // each batch below the Workers Free plan's per-invocation external limit.
+    let batches = 0;
+    while (importState.importPending) {
+      if (++batches > 500) return json({ error: "repository_import_too_large" }, { status: 413 });
+      const batch = await room.fetch("https://room/import-batch", { method: "POST" });
+      if (!batch.ok) return batch;
+      importState = { importPending: !(await batch.json() as { done?: boolean }).done };
+    }
     const saved = await account(env, auth.login).fetch("https://account/workspaces", { method: "PUT", body: JSON.stringify(record) });
     return json({ ...(await saved.json() as object), workspace: record }, { status: 201 });
   }
