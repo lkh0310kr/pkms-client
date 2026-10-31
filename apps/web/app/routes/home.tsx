@@ -104,6 +104,7 @@ export default function Home() {
   const [showHiddenFiles, setShowHiddenFiles] = useState(false);
   const [excludedPatterns, setExcludedPatterns] = useState("");
   const [showFileFilters, setShowFileFilters] = useState(false);
+  const [outlineOpen, setOutlineOpen] = useState(false);
   const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true);
   const [activeFile, setActiveFile] = useState<FileRecord | null>(null);
   const [openTabs, setOpenTabs] = useState<FileRecord[]>([]);
@@ -121,12 +122,14 @@ export default function Home() {
   const socket = useRef<WebSocket | null>(null);
   const treeRef = useRef<HTMLElement>(null);
   const quickOpenInput = useRef<HTMLInputElement>(null);
+  const editorNavigate = useRef<((line: number) => void) | null>(null);
   const openFileRef = useRef<((file: FileRecord) => Promise<void>) | null>(null);
   const docs = useRef(new Map<string, { doc: Y.Doc; persistence: IndexeddbPersistence; observer?: () => void; updateHandler?: (update: Uint8Array, origin: unknown) => void }>());
   const activeRef = useRef<{ file: FileRecord | null; doc: Y.Doc | null; text: Y.Text | null; value: string }>({ file: null, doc: null, text: null, value: "" });
   const pending = useRef(new Map<string, RealtimeMessage>());
   const hydrating = useRef(false);
   const autoSaveTimers = useRef(new Map<string, number>());
+  const registerEditorNavigator = useCallback((navigate: ((line: number) => void) | null) => { editorNavigate.current = navigate; }, []);
 
   useEffect(() => {
     if (!activeWorkspace) return;
@@ -568,6 +571,10 @@ export default function Home() {
     !excludedPatterns.split("\n").some((pattern) => matchesExcludePattern(file.path, pattern))
   );
   const treeRows = flattenTree(visibleFiles, expandedFolders);
+  const outlineItems = text.split("\n").flatMap((line, index) => {
+    const heading = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+    return heading ? [{ line: index + 1, level: heading[1].length, title: heading[2] }] : [];
+  });
   const parentFolder = parentPath(currentFolder);
   const persistTreeScroll = (scrollTop: number) => {
     if (!activeWorkspace) return;
@@ -766,8 +773,8 @@ export default function Home() {
         </section></div>}
         {quickOpen && <div className="modal-backdrop quick-open-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickOpen(false); }}><section className="quick-open-modal" role="dialog" aria-modal="true" aria-label="Quick open"><input ref={quickOpenInput} value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} placeholder="Search open and loaded files…" onKeyDown={(event) => { if (event.key === "Escape") setQuickOpen(false); else if (event.key === "Enter" && quickOpenResults[0]) { void openFile(quickOpenResults[0]); setQuickOpen(false); } }} /><div className="quick-open-results">{quickOpenResults.map((file) => <button key={file.id} onClick={() => { void openFile(file); setQuickOpen(false); }}><span>{entryName(file.path)}</span><small>{file.path}</small></button>)}{!quickOpenResults.length && <p className="empty-hint">No loaded files found</p>}</div></section></div>}
         {!activeWorkspace ? <div className="empty-workspace"><h2>No workspace</h2><button className="primary-button" onClick={openRepositoryPicker}>Connect repository</button></div> : !activeFile ? <div className="empty-workspace"><h2>No file open</h2><button className="primary-button" onClick={newNote}>New note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout">
-          <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div><div className="editor-controls"><label className="editor-mode-select"><span className="sr-only">Editor view</span><select value={editorMode} onChange={(event) => setEditorMode(event.target.value as "live" | "source" | "read")}><option value="live">Live</option><option value="source">Source</option><option value="read">Read</option></select><span aria-hidden="true">{editorMode === "source" ? "Source" : editorMode === "read" ? "Read" : "Live"}⌄</span></label><button className="save-button" onClick={saveActiveFileNow} title="Save now (⌘S / Ctrl+S)">Save</button></div></div>
-          <div className={`editor-columns mode-${editorMode}`}><div className="source-column"><div className="column-label">SOURCE</div><Suspense fallback={<div className="editor-loading">Opening editor…</div>}><MarkdownCodeEditor key={activeFile.id} value={text} onChange={handleText} mode={editorMode} /></Suspense></div><div className="preview-column"><article className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></article></div></div>
+          <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div><div className="editor-controls"><div className="outline-control"><button className={`mini-button outline-button${outlineOpen ? " active" : ""}`} title="Note outline" aria-label="Note outline" aria-expanded={outlineOpen} onClick={() => setOutlineOpen((open) => !open)}>☷</button>{outlineOpen && <div className="outline-popover" role="navigation" aria-label="Note outline">{outlineItems.length ? outlineItems.map((item) => <button key={`${item.line}-${item.title}`} style={{ paddingLeft: 8 + (item.level - 1) * 11 }} title={item.title} onClick={() => { setEditorMode("live"); setOutlineOpen(false); requestAnimationFrame(() => editorNavigate.current?.(item.line)); }}>{item.title}</button>) : <span>No headings</span>}</div>}</div><label className="editor-mode-select"><span className="sr-only">Editor view</span><select value={editorMode} onChange={(event) => setEditorMode(event.target.value as "live" | "source" | "read")}><option value="live">Live</option><option value="source">Source</option><option value="read">Read</option></select><span aria-hidden="true">{editorMode === "source" ? "Source" : editorMode === "read" ? "Read" : "Live"}⌄</span></label><button className="save-button" onClick={saveActiveFileNow} title="Save now (⌘S / Ctrl+S)">Save</button></div></div>
+          <div className={`editor-columns mode-${editorMode}`}><div className="source-column"><div className="column-label">SOURCE</div><Suspense fallback={<div className="editor-loading">Opening editor…</div>}><MarkdownCodeEditor key={activeFile.id} value={text} onChange={handleText} mode={editorMode} onNavigateReady={registerEditorNavigator} /></Suspense></div><div className="preview-column"><article className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></article></div></div>
         </div> : <div className="asset-view"><div className="file-icon large">◇</div><h2>{activeFile.path.split("/").at(-1)}</h2><p>{activeFile.size ? `${(activeFile.size / 1024).toFixed(1)} KB` : "Attachment"}</p><a className="primary-button" href={`/api/workspaces/${activeWorkspace.id}/assets/${activeFile.id}`} target="_blank" rel="noreferrer">Open file</a></div>}
         {sync.githubStatus === "external-change" && <div className="external-warning"><strong>GitHub branch changed outside PKMS.</strong><span>PKMS paused its commit so it won’t overwrite that change. {sync.message}</span></div>}
       </section>

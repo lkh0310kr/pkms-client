@@ -46,7 +46,7 @@ const livePreview = ViewPlugin.fromClass(class {
   }
 }, { decorations: (plugin) => plugin.decorations });
 
-export function MarkdownCodeEditor({ value, onChange, mode = "live" }: { value: string; onChange: (value: string) => void; mode?: "live" | "source" | "read" }) {
+export function MarkdownCodeEditor({ value, onChange, mode = "live", onNavigateReady }: { value: string; onChange: (value: string) => void; mode?: "live" | "source" | "read"; onNavigateReady?: (navigate: ((line: number) => void) | null) => void }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const modeCompartment = useRef(new Compartment());
@@ -82,6 +82,19 @@ export function MarkdownCodeEditor({ value, onChange, mode = "live" }: { value: 
   useEffect(() => {
     view.current?.dispatch({ effects: modeCompartment.current.reconfigure(mode === "live" ? livePreview : []) });
   }, [mode]);
+
+  useEffect(() => {
+    if (!view.current || !onNavigateReady) return;
+    const navigate = (line: number) => {
+      const editor = view.current;
+      if (!editor) return;
+      const position = editor.state.doc.line(Math.max(1, Math.min(line, editor.state.doc.lines))).from;
+      editor.dispatch({ selection: { anchor: position }, scrollIntoView: true });
+      editor.focus();
+    };
+    onNavigateReady(navigate);
+    return () => onNavigateReady(null);
+  }, [onNavigateReady]);
 
   useEffect(() => {
     const editor = view.current;

@@ -120,7 +120,13 @@ button { cursor: pointer; }
 .editor-layout { display: flex; width: min(1440px, 100%); height: auto; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; margin: 0 auto; padding: 18px clamp(18px, 4vw, 54px) 16px; }
 .editor-heading { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding: 3px 0 10px; }
 .editor-title-block { min-width: 0; }
-.editor-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.editor-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
+.outline-control { position: relative; }
+.outline-button { width: 29px; height: 29px; border: 1px solid var(--border); background: var(--surface); font-size: 15px; }
+.outline-popover { position: absolute; z-index: 4; top: calc(100% + 6px); right: 0; display: flex; width: min(260px, 70vw); max-height: min(50dvh, 360px); flex-direction: column; overflow: auto; padding: 5px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); box-shadow: 0 8px 24px #0002; }
+.outline-popover button { min-height: 28px; overflow: hidden; padding-right: 8px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; text-align: left; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.outline-popover button:hover { color: var(--text); background: var(--hover); }
+.outline-popover > span { padding: 8px; color: var(--muted); font-size: 11px; }
 .editor-mode-select { position: relative; display: inline-flex; height: 29px; align-items: center; gap: 7px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface); font-size: 11px; }
 .editor-mode-select select { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
 .editor-mode-select:focus-within { outline: 1px solid var(--accent); }
