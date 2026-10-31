@@ -34,16 +34,22 @@ export async function signSession(env: Env, session: Session): Promise<string> {
 }
 
 export async function verifySession(env: Env, value: string | undefined): Promise<Session | null> {
-  if (!value) return null;
+  return (await verifySessionDetailed(env, value)).session;
+}
+
+export async function verifySessionDetailed(env: Env, value: string | undefined): Promise<{ session: Session | null; reason: "missing" | "malformed" | "bad_signature" | "invalid_payload" | "expired" | "valid" }> {
+  if (!value) return { session: null, reason: "missing" };
   const [payload, signature, extra] = value.split(".");
-  if (!payload || !signature || extra) return null;
+  if (!payload || !signature || extra) return { session: null, reason: "malformed" };
   const expected = base64url(await hmac(env.SESSION_SECRET, payload));
-  if (!constantTimeEqual(signature, expected)) return null;
+  if (!constantTimeEqual(signature, expected)) return { session: null, reason: "bad_signature" };
   try {
     const session = JSON.parse(decoder.decode(unbase64(payload))) as Session;
-    return session.login && session.expiresAt > Date.now() ? session : null;
+    if (!session.login || typeof session.expiresAt !== "number") return { session: null, reason: "invalid_payload" };
+    if (session.expiresAt <= Date.now()) return { session: null, reason: "expired" };
+    return { session, reason: "valid" };
   } catch {
-    return null;
+    return { session: null, reason: "invalid_payload" };
   }
 }
 

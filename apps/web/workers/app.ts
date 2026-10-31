@@ -2,7 +2,7 @@ import { createRequestHandler } from "react-router";
 import type { Env, Session, WorkspaceRecord } from "./env";
 import { AccountStore } from "./AccountStore";
 import { VaultRoom } from "./VaultRoom";
-import { cookie, decryptSecret, encryptSecret, json, randomToken, sessionCookie, signSession, verifySession } from "./crypto";
+import { cookie, decryptSecret, encryptSecret, json, randomToken, sessionCookie, signSession, verifySession, verifySessionDetailed } from "./crypto";
 
 export { AccountStore, VaultRoom };
 
@@ -215,11 +215,12 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
   if (request.method === "GET" && url.pathname === "/api/session") {
     const bearer = request.headers.get("Authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
     const sessionCookieValue = cookie(request, "__Host-pkms_session");
-    const session = await verifySession(env, bearer ?? sessionCookieValue);
+    const validation = await verifySessionDetailed(env, bearer ?? sessionCookieValue);
+    const session = validation.session;
     trace(requestId, "auth.session.checked", {
       bearerPresent: Boolean(bearer),
       cookiePresent: Boolean(sessionCookieValue),
-      sessionValid: Boolean(session),
+      validation: bearer || sessionCookieValue ? validation.reason : "missing",
     });
     return json({ user: session ? { login: session.login, avatarUrl: session.avatarUrl } : null });
   }
