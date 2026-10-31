@@ -348,11 +348,9 @@ export default function Home() {
     <main className="welcome-screen">
       <div className="welcome-card">
         <div className="brand-lockup"><div className="brand-mark">P</div><span>PKMS</span></div>
-        <h1>Your notes, in sync.</h1>
-        <p>A fast, collaborative Markdown workspace stored in your GitHub repository.</p>
+        <h1>Sign in to PKMS</h1>
         {error && <div className="notice error">{error}</div>}
         <a className="primary-button github-button" href="/api/auth/github"><GitHubIcon /> Continue with GitHub</a>
-        <small>Your repository remains yours. PKMS writes changes back to GitHub automatically.</small>
       </div>
     </main>
   );
@@ -382,7 +380,7 @@ export default function Home() {
           </nav>
         </>}
         <div className="sidebar-bottom">
-          <div className={`sync-indicator ${sync.githubStatus}`}><span className="status-dot" /><span>{sync.githubStatus === "synced" ? "GitHub up to date" : sync.githubStatus === "pending" ? "Saved to cloud · GitHub pending" : sync.githubStatus === "external-change" ? "GitHub changed outside PKMS" : "Sync needs attention"}</span></div>
+          <div className={`sync-indicator ${sync.githubStatus}`}><span className="status-dot" /><span>{sync.githubStatus === "synced" ? "Synced" : sync.githubStatus === "pending" ? "Saving" : sync.githubStatus === "external-change" ? "GitHub changed" : "Sync error"}</span></div>
           <div className="account-row"><img src={user.avatarUrl} alt="" /><span>@{user.login}</span><button className="icon-button logout-button" title="Sign out" onClick={() => void api("/api/logout", { method: "POST" }).then(() => window.location.reload())}>↪</button></div>
         </div>
       </aside>
@@ -392,16 +390,16 @@ export default function Home() {
           <div className="breadcrumbs"><span>{activeWorkspace?.repository ?? "No workspace"}</span>{activeFile && <><span className="crumb-slash">/</span><span>{activeFile.path}</span></>}</div>
           <div className="topbar-right">
             <span className={`save-label ${saving ? "active" : ""}`}><span className="status-dot" />{saving ? "Saving…" : notice || (sync.githubStatus === "synced" ? "All changes saved" : "Saved to cloud")}</span>
-            <div className="collaborators" aria-label="Collaborators"><img src={user.avatarUrl} alt={user.login} /><span>{peers.length > 1 ? `${peers.length} here` : "Just you"}</span></div>
+            {peers.length > 1 && <div className="collaborators" aria-label="Collaborators"><span>{peers.length} here</span></div>}
           </div>
         </header>
         {error && <button className="notice error dismissible" onClick={() => setError("")}>{error}<span>×</span></button>}
         {showRepositories && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowRepositories(false); }}><section className="repository-modal">
-          <button className="modal-close" onClick={() => setShowRepositories(false)}>×</button><span className="eyebrow">GITHUB</span><h2>Choose a repository</h2><p>PKMS will create a workspace from the repository’s default branch.</p>
+          <button className="modal-close" onClick={() => setShowRepositories(false)}>×</button><span className="eyebrow">GITHUB</span><h2>Choose a repository</h2>
           <div className="repository-list">{repositories.map((repository) => <button key={repository.fullName} className="repository-option" onClick={() => void connectRepository(repository)}><span className="repo-icon">{repository.private ? "◈" : "◇"}</span><span><strong>{repository.fullName}</strong><small>{repository.defaultBranch} · {repository.private ? "Private" : "Public"}</small></span><span className="option-arrow">→</span></button>)}{!repositories.length && <p className="empty-hint">No writable repositories found.</p>}</div>
         </section></div>}
-        {!activeWorkspace ? <div className="empty-workspace"><div className="empty-illustration">⌘</div><h2>Connect your notes</h2><p>Choose a GitHub repository to open it as your PKMS workspace.</p><button className="primary-button" onClick={openRepositoryPicker}>Choose repository</button></div> : !activeFile ? <div className="empty-workspace"><div className="empty-illustration">✎</div><h2>Your workspace is ready</h2><p>Open a Markdown file, or create a note to start writing.</p><button className="primary-button" onClick={newNote}>Create a note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout">
-          <div className="editor-heading"><span className="eyebrow">MARKDOWN</span><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1><div className="live-presence"><span className="status-dot green" /> Live collaboration enabled</div></div>
+        {!activeWorkspace ? <div className="empty-workspace"><h2>No workspace</h2><button className="primary-button" onClick={openRepositoryPicker}>Connect repository</button></div> : !activeFile ? <div className="empty-workspace"><h2>No file open</h2><button className="primary-button" onClick={newNote}>New note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout">
+          <div className="editor-heading"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div>
           <div className="editor-columns"><div className="source-column"><div className="column-label">EDITOR</div><textarea className="markdown-editor" aria-label="Markdown editor" spellCheck autoCapitalize="sentences" value={text} onChange={(event) => handleText(event.target.value)} placeholder="Start writing in Markdown…" /></div><div className="preview-column"><div className="column-label">PREVIEW</div><article className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></article></div></div>
         </div> : <div className="asset-view"><div className="file-icon large">◇</div><h2>{activeFile.path.split("/").at(-1)}</h2><p>{activeFile.size ? `${(activeFile.size / 1024).toFixed(1)} KB` : "Attachment"}</p><a className="primary-button" href={`/api/workspaces/${activeWorkspace.id}/assets/${activeFile.id}`} target="_blank" rel="noreferrer">Open file</a></div>}
         {sync.githubStatus === "external-change" && <div className="external-warning"><strong>GitHub branch changed outside PKMS.</strong><span>PKMS paused its commit so it won’t overwrite that change. {sync.message}</span></div>}

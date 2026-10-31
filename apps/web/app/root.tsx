@@ -5,7 +5,7 @@ import styles from "./styles.css?url";
 export const links: LinksFunction = () => [{ rel: "stylesheet", href: styles }];
 export const meta: MetaFunction = () => [
   { title: "PKMS — your Markdown workspace" },
-  { name: "description", content: "A fast, collaborative Markdown vault backed by your GitHub repository." },
+  { name: "description", content: "Markdown files synced with GitHub." },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {
