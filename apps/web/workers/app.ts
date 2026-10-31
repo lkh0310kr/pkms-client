@@ -6,6 +6,8 @@ import { cookie, decryptSecret, encryptSecret, json, randomToken, sessionCookie,
 
 export { AccountStore, VaultRoom };
 
+const ALLOWED_GITHUB_LOGIN = "lkh0310kr";
+
 
 interface Credentials {
   accessToken: string;
@@ -43,6 +45,10 @@ async function saveGitHubGrant(env: Env, grant: GitHubGrant, requestId: string):
   }
   const user = await userResponse.json() as { login: string; avatar_url?: string };
   trace(requestId, "auth.github.user_lookup.succeeded", { login: user.login });
+  if (user.login.toLowerCase() !== ALLOWED_GITHUB_LOGIN) {
+    trace(requestId, "auth.github.user_lookup.rejected", { reason: "account_not_allowed", login: user.login });
+    throw new AuthFlowError("github_account_not_allowed");
+  }
   const stored: Record<string, unknown> = {
     accessToken: await encryptSecret(env, grant.access_token),
     user: { login: user.login, avatarUrl: user.avatar_url },
@@ -74,6 +80,10 @@ async function requireSession(request: Request, env: Env, requestId: string): Pr
   if (!session) {
     trace(requestId, "auth.session.rejected", { path: new URL(request.url).pathname });
     return json({ error: "unauthorized", requestId }, { status: 401 });
+  }
+  if (session.login.toLowerCase() !== ALLOWED_GITHUB_LOGIN) {
+    trace(requestId, "auth.session.rejected", { path: new URL(request.url).pathname, reason: "account_not_allowed", login: session.login });
+    return json({ error: "account_not_allowed", requestId }, { status: 403 });
   }
   return session;
 }
@@ -220,9 +230,11 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
     trace(requestId, "auth.session.checked", {
       bearerPresent: Boolean(bearer),
       cookiePresent: Boolean(sessionCookieValue),
-      validation: bearer || sessionCookieValue ? validation.reason : "missing",
+      validation: validation.reason,
+      accountAllowed: Boolean(session && session.login.toLowerCase() === ALLOWED_GITHUB_LOGIN),
     });
-    return json({ user: session ? { login: session.login, avatarUrl: session.avatarUrl } : null });
+    const allowedSession = session?.login.toLowerCase() === ALLOWED_GITHUB_LOGIN ? session : null;
+    return json({ user: allowedSession ? { login: allowedSession.login, avatarUrl: allowedSession.avatarUrl } : null });
   }
   if (request.method === "POST" && url.pathname === "/api/logout") {
     if (!sameOrigin(request, env)) return json({ error: "origin_mismatch" }, { status: 403 });

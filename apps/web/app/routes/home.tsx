@@ -130,6 +130,7 @@ export default function Home() {
     const requestId = searchParams.get("request_id");
     const messages: Record<string, string> = {
       github_access_denied: "GitHub access was declined.",
+      github_account_not_allowed: "This GitHub account is not allowed.",
       github_authorization_failed: "GitHub authorization failed.",
       invalid_oauth_state: "Sign-in expired. Try again.",
       github_code_rejected: "GitHub rejected the sign-in code.",
