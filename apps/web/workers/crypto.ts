@@ -16,7 +16,9 @@ function base64(bytes: Uint8Array): string {
 }
 
 function unbase64(value: string): Uint8Array {
-  return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+  const standard = value.replaceAll("-", "+").replaceAll("_", "/");
+  const padded = standard.padEnd(Math.ceil(standard.length / 4) * 4, "=");
+  return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
 }
 
 function base64url(bytes: Uint8Array): string {
