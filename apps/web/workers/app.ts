@@ -254,7 +254,9 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
   }
   if (url.pathname === "/api/workspaces" && request.method === "GET") {
     const response = await account(env, auth.login).fetch("https://account/workspaces");
-    return response;
+    if (!response.ok) return json({ error: "workspace_list_failed" }, { status: response.status });
+    const workspaces = await response.json() as { workspaces: WorkspaceRecord[] };
+    return json(workspaces);
   }
   if (url.pathname === "/api/workspaces" && request.method === "POST") {
     const body = await request.json() as { repository?: string; branch?: string };
