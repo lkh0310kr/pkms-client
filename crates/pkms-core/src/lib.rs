@@ -3,8 +3,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use yrs::{
-    Doc, GetString, Options, OffsetKind, ReadTxn, StateVector, Text, Transact, Update,
+    ClientID, Doc, GetString, Options, OffsetKind, ReadTxn, StateVector, Text, Transact, Update,
 };
+use yrs::updates::{decoder::Decode, encoder::Encode};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const TEXT_ROOT: &str = "markdown";
@@ -96,7 +97,7 @@ impl MarkdownDoc {
     pub fn new(client_id: u64) -> Self {
         Self {
             doc: Doc::with_options(Options {
-                client_id: client_id.into(),
+                client_id: ClientID::new(client_id),
                 offset_kind: OffsetKind::Utf16,
                 ..Options::default()
             }),
