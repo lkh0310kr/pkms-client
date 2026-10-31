@@ -18,7 +18,7 @@ interface RefResponse { object: { sha: string } }
 interface TreeResponse { sha: string; tree: Array<{ path: string; mode: string; type: string; sha: string; size?: number }>; truncated: boolean }
 interface DirectoryRow { [key: string]: SqlStorageValue; path: string; tree_sha: string; loaded: number }
 class GitHubRequestError extends Error {
-  constructor(readonly status: number) { super("GitHub request failed"); this.name = "GitHubRequestError"; }
+  constructor(readonly status: number) { super(`GitHub request failed (HTTP ${status})`); this.name = "GitHubRequestError"; }
 }
 
 function asBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
@@ -221,8 +221,13 @@ export class VaultRoom extends DurableObject<Env> {
       if (url.pathname === "/sync-status" && request.method === "GET") return json(await this.syncStatus());
       if (url.pathname === "/flush" && request.method === "POST") {
         await this.ctx.storage.deleteAlarm();
-        await this.flushGitHub();
-        return json(await this.syncStatus());
+        try {
+          await this.flushGitHub();
+          return json(await this.syncStatus());
+        } catch (error) {
+          await this.scheduleGitHubRetry(error, "manual");
+          throw error;
+        }
       }
       if (url.pathname === "/operations" && request.method === "POST") return this.applyOperation(await request.json() as Record<string, unknown>);
       if (url.pathname.startsWith("/files/") && url.pathname.endsWith("/updates") && request.method === "GET") {
@@ -584,11 +589,21 @@ export class VaultRoom extends DurableObject<Env> {
     try {
       await this.flushGitHub();
     } catch (error) {
-      this.setMeta("githubStatus", "failed");
-      this.setMeta("githubMessage", error instanceof Error ? error.message : "GitHub sync failed");
-      await this.ctx.storage.setAlarm(Date.now() + Math.min(60 * 60 * 1000, 30_000 * 2 ** Number(this.getMeta("retryCount") ?? 0)));
-      this.setMeta("retryCount", String(Math.min(7, Number(this.getMeta("retryCount") ?? 0) + 1)));
+      await this.scheduleGitHubRetry(error, "alarm");
     }
+  }
+
+  private async scheduleGitHubRetry(error: unknown, source: "manual" | "alarm"): Promise<void> {
+    const retryCount = Number(this.getMeta("retryCount") ?? "0");
+    const retryAfterMs = Math.min(60 * 60 * 1000, 30_000 * 2 ** retryCount);
+    const upstreamStatus = error instanceof GitHubRequestError ? error.status : undefined;
+    const errorType = error instanceof Error ? error.name : "unknown";
+    const pendingFiles = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM files WHERE deleted = 1 OR dirty = 1").toArray()[0]?.count ?? 0;
+    this.setMeta("githubStatus", "failed");
+    this.setMeta("githubMessage", upstreamStatus ? `GitHub sync failed (HTTP ${upstreamStatus}). Retrying automatically.` : "GitHub sync failed. Retrying automatically.");
+    this.setMeta("retryCount", String(Math.min(7, retryCount + 1)));
+    await this.ctx.storage.setAlarm(Date.now() + retryAfterMs);
+    console.error(JSON.stringify({ event: "github.flush.failed", source, errorType, upstreamStatus, retryAfterMs, pendingFiles }));
   }
 
   private async flushGitHub(): Promise<void> {
