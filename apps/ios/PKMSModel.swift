@@ -341,7 +341,7 @@ final class PKMSModel {
         markdown = doc.text
         do {
             let vector = doc.stateVector.base64EncodedString()
-            var components = URLComponents(url: endpoint("/api/workspaces/\(workspace.id)/files/\(file.id)/updates"), resolvingAgainstBaseURL: false)
+            var components = URLComponents(url: endpoint("/api/workspaces/\(workspace.id)/files/\(file.id)/updates").absoluteURL, resolvingAgainstBaseURL: true)
             components?.queryItems = [URLQueryItem(name: "stateVector", value: vector)]
             guard let url = components?.url else { throw PKMSClientError.invalidServerURL }
             let update = try await get(url, as: PKMSFileUpdate.self)
@@ -364,7 +364,7 @@ final class PKMSModel {
 
     private func loadDirectory(_ path: String) async {
         guard let workspace = activeWorkspace,
-              var components = URLComponents(url: endpoint("/api/workspaces/\(workspace.id)/directory"), resolvingAgainstBaseURL: false) else { return }
+              var components = URLComponents(url: endpoint("/api/workspaces/\(workspace.id)/directory").absoluteURL, resolvingAgainstBaseURL: true) else { return }
         components.queryItems = [URLQueryItem(name: "path", value: path)]
         guard let url = components.url else { return }
         do {
