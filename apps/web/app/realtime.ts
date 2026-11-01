@@ -21,7 +21,7 @@ function sharedClient(url: string, anonKey: string): SupabaseClient {
   if (!client) {
     client = createClient(url, anonKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-      realtime: { transport: DiagnosticWebSocket },
+      realtime: { transport: DiagnosticWebSocket, params: { log_level: "info" } },
     });
     clients.set(key, client);
   }
