@@ -168,7 +168,7 @@ async function invokeTool(
     if (!/^[a-f0-9]{32}$/.test(workspaceId) || !validAgentPath(path)) return toolError("Invalid workspace or path.");
     const file = await resolveFile(env, request, requestId, dependencies, workspaceId, path);
     if (!file || file.kind !== "markdown") return toolError("Markdown file not found.");
-    const response = await callApi(new Request(`${base}/api/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(file.id)}`, { headers: { Authorization: request.headers.get("Authorization") ?? "" } }), env, requestId, dependencies);
+    const response = await callApi(new Request(`${base}/api/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(file.id)}/updates`, { headers: { Authorization: request.headers.get("Authorization") ?? "" } }), env, requestId, dependencies);
     if (!response.ok) return toolError("Could not read the Markdown file.");
     const data = await response.json() as { update: string; revision?: number };
     const Y = await import("yjs");
