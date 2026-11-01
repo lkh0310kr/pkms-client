@@ -66,6 +66,7 @@ function matchesExcludePattern(path: string, pattern: string): boolean {
 }
 
 interface TreeRow { file: FileRecord; depth: number }
+interface TreeContextMenu { file: FileRecord; x: number; y: number }
 function flattenTree(files: FileRecord[], expanded: Set<string>): TreeRow[] {
   const children = new Map<string, FileRecord[]>();
   for (const file of files) {
@@ -118,6 +119,7 @@ export default function Home() {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => new Set([""]));
   const [loadedFolders, setLoadedFolders] = useState<Set<string>>(() => new Set());
   const [focusedTreePath, setFocusedTreePath] = useState<string | null>(null);
+  const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenu | null>(null);
   const [showHiddenFiles, setShowHiddenFiles] = useState(false);
   const [excludedPatterns, setExcludedPatterns] = useState("");
   const [showFileFilters, setShowFileFilters] = useState(false);
@@ -140,6 +142,7 @@ export default function Home() {
   const [peers, setPeers] = useState<Peer[]>([]);
   const socket = useRef<PKMSRealtimeSocket | null>(null);
   const treeRef = useRef<HTMLElement>(null);
+  const treeContextMenuRef = useRef<HTMLDivElement>(null);
   const quickOpenInput = useRef<HTMLInputElement>(null);
   const editorNavigate = useRef<((line: number) => void) | null>(null);
   const routedPath = useRef<string | null>(null);
@@ -150,6 +153,20 @@ export default function Home() {
   const hydrating = useRef(false);
   const autoSaveTimers = useRef(new Map<string, number>());
   const registerEditorNavigator = useCallback((navigate: ((line: number) => void) | null) => { editorNavigate.current = navigate; }, []);
+
+  useEffect(() => {
+    if (!treeContextMenu) return;
+    const dismissOutside = (event: PointerEvent) => {
+      if (!treeContextMenuRef.current?.contains(event.target as Node)) setTreeContextMenu(null);
+    };
+    const dismissEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") { setTreeContextMenu(null); treeRef.current?.focus(); }
+    };
+    document.addEventListener("pointerdown", dismissOutside);
+    document.addEventListener("keydown", dismissEscape);
+    requestAnimationFrame(() => treeContextMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+    return () => { document.removeEventListener("pointerdown", dismissOutside); document.removeEventListener("keydown", dismissEscape); };
+  }, [treeContextMenu]);
 
   useEffect(() => {
     if (!activeWorkspace) return;
@@ -631,9 +648,9 @@ export default function Home() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not connect repository"); }
   };
 
-  const newNote = async () => {
+  const newNote = async (directory = currentFolder) => {
     if (!activeWorkspace) return;
-    const path = `${currentFolder ? `${currentFolder}/` : ""}Untitled ${new Date().toLocaleString("sv-SE").replaceAll(":", "-")}.md`;
+    const path = `${directory ? `${directory}/` : ""}Untitled ${new Date().toLocaleString("sv-SE").replaceAll(":", "-")}.md`;
     try {
       const result = await api<{ operationId: string; acceptedRevision: number; conflictCopyPath?: string }>(`/api/workspaces/${activeWorkspace.id}/operations`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -646,12 +663,12 @@ export default function Home() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create note"); }
   };
 
-  const newFolder = async () => {
+  const newFolder = async (directory = currentFolder) => {
     if (!activeWorkspace) return;
     const name = window.prompt("New folder");
     if (!name?.trim()) return;
     try {
-      await api(`/api/workspaces/${activeWorkspace.id}/operations`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "create-folder", path: `${currentFolder ? `${currentFolder}/` : ""}${name.trim()}` } }) });
+      await api(`/api/workspaces/${activeWorkspace.id}/operations`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "create-folder", path: `${directory ? `${directory}/` : ""}${name.trim()}` } }) });
       const snapshot = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`);
       setFiles(snapshot.files);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create folder"); }
@@ -734,7 +751,8 @@ export default function Home() {
       });
       const snapshot = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`);
       setFiles(snapshot.files);
-      const renamedActive = activeFile?.id === file.id ? snapshot.files.find((entry) => entry.id === file.id) : null;
+      const activeMovesWithItem = activeFile && (activeFile.id === file.id || (file.kind === "folder" && activeFile.path.startsWith(`${file.path}/`)));
+      const renamedActive = activeMovesWithItem ? snapshot.files.find((entry) => entry.id === activeFile.id) : null;
       if (renamedActive) {
         setActiveFile(renamedActive);
         const target = fileLocationPath(activeWorkspace.id, renamedActive.path);
@@ -767,6 +785,46 @@ export default function Home() {
     const name = window.prompt("Rename", entryName(currentFolder));
     if (!name?.trim() || name.trim() === entryName(currentFolder)) return;
     void updateFilePath(folder, `${parentPath(currentFolder) ? `${parentPath(currentFolder)}/` : ""}${name.trim()}`);
+  };
+
+  const renameTreeItem = (file: FileRecord) => {
+    setTreeContextMenu(null);
+    const currentName = entryName(file.path);
+    const name = window.prompt("Rename", currentName);
+    if (!name?.trim() || name.trim() === currentName) return;
+    const parent = parentPath(file.path);
+    void updateFilePath(file, `${parent ? `${parent}/` : ""}${name.trim()}`);
+  };
+
+  const deleteTreeItem = async (file: FileRecord) => {
+    setTreeContextMenu(null);
+    if (!activeWorkspace || !window.confirm(`Delete ${entryName(file.path)}?`)) return;
+    try {
+      await api(`/api/workspaces/${activeWorkspace.id}/operations`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "delete", fileId: file.id } }),
+      });
+      const isInside = (path: string) => path === file.path || (file.kind === "folder" && path.startsWith(`${file.path}/`));
+      setFiles((current) => current.filter((entry) => !isInside(entry.path)));
+      if (file.kind === "folder") {
+        setExpandedFolders((current) => new Set([...current].filter((path) => !isInside(path))));
+        setLoadedFolders((current) => new Set([...current].filter((path) => !isInside(path))));
+      }
+      if (currentFolder && isInside(currentFolder)) setCurrentFolder(parentPath(file.path));
+      if (activeFile && isInside(activeFile.path)) {
+        clearActiveFile();
+        routedPath.current = null;
+        navigate("/", { replace: true, preventScrollReset: true });
+      }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not delete item"); }
+  };
+
+  const openTreeItem = (file: FileRecord) => {
+    setTreeContextMenu(null);
+    if (file.kind !== "folder") { void openFile(file); return; }
+    setCurrentFolder(file.path);
+    setFocusedTreePath(file.path);
+    if (!expandedFolders.has(file.path)) void toggleFolder(file);
   };
 
   const deleteActiveFile = async () => {
@@ -845,6 +903,13 @@ export default function Home() {
               className={`tree-row ${file.kind === "folder" ? "folder-row" : "file-row"}${file.path === currentFolder && file.kind === "folder" ? " selected" : ""}${activeFile?.id === file.id ? " selected" : ""}`}
               style={{ paddingLeft: 8 + depth * 14 }}
               onFocus={() => setFocusedTreePath(file.path)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.currentTarget.focus();
+                setFocusedTreePath(file.path);
+                const menuHeight = file.kind === "folder" ? 176 : 104;
+                setTreeContextMenu({ file, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 196)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)) });
+              }}
               onClick={() => file.kind === "folder" ? void toggleFolder(file) : void openFile(file)}
             >
               <span className={`tree-chevron${expandedFolders.has(file.path) ? " expanded" : ""}`} aria-hidden="true">{file.kind === "folder" && <AppIcon name="chevron" />}</span>
@@ -853,6 +918,15 @@ export default function Home() {
             </button>)}
             {!treeRows.length && <p className="empty-hint">{loadingFolder ? "Loading…" : "Empty folder"}</p>}
           </nav>
+          {treeContextMenu && <div ref={treeContextMenuRef} className="tree-context-menu" role="menu" aria-label={`${entryName(treeContextMenu.file.path)} actions`} style={{ left: treeContextMenu.x, top: treeContextMenu.y }}>
+            <button role="menuitem" onClick={() => openTreeItem(treeContextMenu.file)}>{treeContextMenu.file.kind === "folder" ? "Open folder" : "Open"}</button>
+            {treeContextMenu.file.kind === "folder" && <>
+              <button role="menuitem" onClick={() => { const directory = treeContextMenu.file.path; setTreeContextMenu(null); void newNote(directory); }}>New note</button>
+              <button role="menuitem" onClick={() => { const directory = treeContextMenu.file.path; setTreeContextMenu(null); void newFolder(directory); }}>New folder</button>
+            </>}
+            <button role="menuitem" onClick={() => renameTreeItem(treeContextMenu.file)}>Rename</button>
+            <button className="danger" role="menuitem" onClick={() => void deleteTreeItem(treeContextMenu.file)}>Delete</button>
+          </div>}
         </>}
         <div className="sidebar-bottom">
           <div className="account-row"><img src={user.avatarUrl} alt="" /><span>@{user.login}</span><button className="icon-button logout-button" title="Sign out" onClick={() => void api("/api/logout", { method: "POST" }).then(() => window.location.reload())}><AppIcon name="logout" /></button></div>
