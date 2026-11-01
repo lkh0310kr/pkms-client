@@ -143,7 +143,6 @@ export default function Home() {
   const quickOpenInput = useRef<HTMLInputElement>(null);
   const editorNavigate = useRef<((line: number) => void) | null>(null);
   const routedPath = useRef<string | null>(null);
-  const serviceRetryAt = useRef(0);
   const openFileRef = useRef<((file: FileRecord, historyAction?: FileNavigation) => Promise<void>) | null>(null);
   const docs = useRef(new Map<string, { doc: Y.Doc; persistence: IndexeddbPersistence; observer?: () => void; updateHandler?: (update: Uint8Array, origin: unknown) => void }>());
   const activeRef = useRef<{ file: FileRecord | null; doc: Y.Doc | null; text: Y.Text | null; value: string }>({ file: null, doc: null, text: null, value: "" });
@@ -176,15 +175,11 @@ export default function Home() {
   const api = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const response = await fetch(path, { credentials: "same-origin", ...init });
     if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as { message?: string; error?: string; retryAfterSeconds?: number };
+      const body = await response.json().catch(() => ({})) as { message?: string; error?: string };
       const requestId = response.headers.get("X-Request-ID") ?? (body as { requestId?: string }).requestId;
       const message = body.message ?? body.error ?? `Request failed (${response.status})`;
-      const error = new Error(`${message}${requestId ? ` · ${requestId}` : ""}`) as Error & { retryAfterSeconds?: number; code?: string };
-      error.retryAfterSeconds = body.retryAfterSeconds ?? (Number(response.headers.get("Retry-After")) || undefined);
+      const error = new Error(`${message}${requestId ? ` · ${requestId}` : ""}`) as Error & { code?: string };
       error.code = body.error;
-      if (body.error === "durable_objects_read_limit" && error.retryAfterSeconds) {
-        serviceRetryAt.current = Date.now() + error.retryAfterSeconds * 1000;
-      }
       throw error;
     }
     if (response.status === 204) return undefined as T;
@@ -315,11 +310,6 @@ export default function Home() {
     let retries = 0;
     const connect = () => {
       if (!alive) return;
-      const serviceDelay = serviceRetryAt.current - Date.now();
-      if (serviceDelay > 0) {
-        retryTimer = window.setTimeout(connect, serviceDelay);
-        return;
-      }
       const ws = new PKMSRealtimeSocket(activeWorkspace.id, clientId, user ?? { login: "Guest" }, api);
       socket.current = ws;
       ws.onopen = () => {
@@ -376,9 +366,8 @@ export default function Home() {
         pending.current.clear();
         setSaving(false);
         if (alive) {
-          const serviceDelay = serviceRetryAt.current - Date.now();
-          const delay = serviceDelay > 0 ? serviceDelay : Math.min(30_000, 1_000 * 2 ** Math.min(retries++, 5));
-          if (serviceDelay <= 0) setError("Live sync disconnected. Reconnecting…");
+          const delay = Math.min(30_000, 1_000 * 2 ** Math.min(retries++, 5));
+          setError("Live sync disconnected. Reconnecting…");
           retryTimer = window.setTimeout(connect, delay);
         }
       };

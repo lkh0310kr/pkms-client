@@ -1,6 +1,4 @@
 export interface Env {
-  ACCOUNTS: DurableObjectNamespace;
-  VAULT_ROOMS: DurableObjectNamespace;
   ASSET_BUCKET: R2Bucket;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
@@ -12,8 +10,6 @@ export interface Env {
   SUPABASE_ANON_KEY: string;
   PKMS_REALTIME_PRIVATE_KEY: string;
   PKMS_REALTIME_KEY_ID: string;
-  MIGRATION_SECRET?: string;
-  PKMS_MAINTENANCE?: string;
 }
 
 export interface Session {

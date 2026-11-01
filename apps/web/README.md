@@ -1,14 +1,16 @@
 # PKMS web and Cloudflare backend
 
-The React Router app and API run in one Cloudflare Worker. Durable Objects hold each account's encrypted GitHub credentials and each workspace's collaboration state, SQLite change log, WebSocket room, and GitHub flush alarm. R2 holds attachments. No paid database or separate worker is required for the personal deployment.
+The React Router app and API run in one Cloudflare Worker. Supabase Postgres stores encrypted GitHub credentials, workspace metadata, files, and Yjs updates; Supabase Realtime carries collaboration updates and presence. The Worker buffers edits and commits them to GitHub every 15 minutes. R2 holds attachments.
 
 ## Local setup
 
 1. Install dependencies from the repository root with `npm install`.
 2. Create a GitHub App configured for user authorization, enable expiring user access tokens, and grant repository Contents read/write permission. Set its callback URL to `http://localhost:5173/api/auth/github/callback`.
 3. Copy `.dev.vars.example` to `.dev.vars`; fill in the app client ID/secret, a random session HMAC secret, and a base64-encoded 32-byte AES key. Generate the AES key with `openssl rand -base64 32`.
-4. Create the attachment bucket once with `npx wrangler r2 bucket create pkms-attachments`.
-5. Start with `npm run dev` from the repository root.
+4. Create a Supabase project, link it with `supabase link`, and apply the schema with `supabase db push`.
+5. Create the attachment bucket once with `npx wrangler r2 bucket create pkms-attachments`.
+6. Set the Supabase URL, anon key, service role key, and ES256 Realtime signing key as Worker secrets.
+7. Start with `npm run dev` from the repository root.
 
 The current deployment uses `https://pkms-cloud.lkh0310kr.workers.dev` as `PUBLIC_ORIGIN`. Its `SESSION_SECRET` and `DATA_ENCRYPTION_KEY` are already configured. Configure the GitHub App callback URL as `https://pkms-cloud.lkh0310kr.workers.dev/api/auth/github/callback`, then add `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` with `npx wrangler secret put NAME` to enable sign-in.
 
@@ -22,19 +24,19 @@ npx wrangler tail pkms-cloud --format json | jq --unbuffered 'select((.logs // [
 
 Match the log `requestId` to the ID shown in the browser. Filtering removes the request URL and headers from the tail output.
 
-## Personal free-tier deployment
+## Free-tier deployment
 
-The app uses SQLite-backed Durable Objects and hibernatable WebSockets. One workspace room serializes updates and sets an alarm on the first pending change; the alarm batches GitHub commits no later than 15 minutes after that change. External branch movement pauses automatic commits. Free-plan limit exhaustion can make writes fail, so the UI must retain the local IndexedDB cache and show retry state.
+Supabase stores edits and schedules them for GitHub backup 15 minutes after the first pending change. A one-minute Worker Cron claims due workspaces and commits through GitHub's Git Data API. Supabase Realtime delivers Yjs updates and presence. External branch movement pauses automatic commits to protect GitHub changes.
 
-Deploy with `npm run deploy` after authenticating Wrangler using `npx wrangler login`. The first deployment requires the Durable Object migration and R2 bucket binding in `wrangler.jsonc`.
+Deploy with `npm run deploy` after authenticating Wrangler using `npx wrangler login`. Configure Supabase secrets and the R2 bucket binding in `wrangler.jsonc` first. The cutover deletes the old Durable Object namespaces; after deployment, sign in to GitHub again and reconnect the repositories you use. GitHub remains the source of note contents.
 
 ## Current scope
 
 - GitHub App OAuth login and token refresh; no long-lived GitHub token is sent to browser storage.
 - Workspace selection lists writable repositories.
 - Markdown CRDT updates use Yjs/Yrs v1 encoding and are persisted before acknowledgements.
-- Markdown documents are cached in IndexedDB and shared over a workspace WebSocket.
-- File create/move/delete operations and attachment uploads are persisted in the room.
+- Markdown documents are cached in IndexedDB and shared over a private Supabase Realtime channel.
+- File create/move/delete operations and attachment uploads are persisted in Supabase and R2.
 - GitHub REST Git Data API commits are batched, retried, and guarded against unexpected branch head changes.
 - Binary uploads have a 50 MiB PKMS limit to keep GitHub blob requests within practical Worker payload limits.
 
@@ -48,7 +50,7 @@ codex mcp login pkms
 codex mcp list
 ```
 
-The OAuth authorization code flow requires PKCE S256 and explicitly shows the requested read/write scopes before redirecting to GitHub. Only the allowed GitHub account can authorize. MCP access tokens are PKMS-scoped signed sessions; GitHub access tokens remain encrypted in the Account Durable Object and are never returned by MCP. The Worker enforces the token scopes on all API routes.
+The OAuth authorization code flow requires PKCE S256 and explicitly shows the requested read/write scopes before redirecting to GitHub. Only the allowed GitHub account can authorize. MCP access tokens are PKMS-scoped signed sessions; GitHub access tokens remain encrypted in Supabase and are never returned by MCP. The Worker enforces the token scopes on all API routes.
 
 Available tools list workspaces and directory entries, read one Markdown file on request, write one Markdown file through the existing Yjs collaboration API, and inspect GitHub backup status. Directory listing returns metadata only; file contents are returned only by `read_file`. MCP errors and invocation logs do not include document bodies, OAuth codes, tokens, or query strings. The consent page warns that content explicitly read by an AI agent may be sent to that agent's model provider.
 
@@ -61,6 +63,9 @@ Available tools list workspaces and directory entries, read one Markdown file on
 | `SESSION_SECRET` | Yes | HMAC signing key for the HttpOnly session cookie |
 | `DATA_ENCRYPTION_KEY` | Yes | Base64 32-byte key for encrypting OAuth tokens at rest |
 | `PUBLIC_ORIGIN` | Yes | Public origin used in OAuth callback and origin checks |
-| `ACCOUNTS` | Binding | Account Durable Object namespace |
-| `VAULT_ROOMS` | Binding | Workspace Durable Object namespace |
+| `SUPABASE_URL` | Secret | Supabase project URL |
+| `SUPABASE_ANON_KEY` | Secret | Client key used to connect Realtime |
+| `SUPABASE_SERVICE_ROLE_KEY` | Secret | Server-only database access |
+| `PKMS_REALTIME_PRIVATE_KEY` | Secret | ES256 signer for scoped Realtime JWTs |
+| `PKMS_REALTIME_KEY_ID` | Variable | Public JWKS key identifier |
 | `ASSET_BUCKET` | Binding | R2 attachment bucket |
