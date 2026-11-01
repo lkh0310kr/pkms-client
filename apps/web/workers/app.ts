@@ -342,7 +342,17 @@ export default {
         else response = await requestHandler(request);
       }
     } catch (error) {
-      trace(requestId, "request.failed", { method: request.method, path: url.pathname, errorType: error instanceof Error ? error.name : "UnknownError" });
+      // Error messages can contain upstream response bodies or user content. Keep the
+      // stack frames (which identify the failing code path) without logging messages.
+      const errorFrames = error instanceof Error
+        ? error.stack?.split("\n").slice(0, 5).map((frame) => frame.trim()).join(" | ")
+        : undefined;
+      trace(requestId, "request.failed", {
+        method: request.method,
+        path: url.pathname,
+        errorType: error instanceof Error ? error.name : "UnknownError",
+        errorFrames,
+      });
       response = url.pathname === "/api/auth/github/callback"
         ? authFailure(requestId, "oauth_callback_internal_error", 500)
         : url.pathname === "/mcp" || url.pathname.startsWith("/oauth/")
