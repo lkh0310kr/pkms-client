@@ -47,6 +47,7 @@ struct PKMSSnapshot: Decodable {
     let revision: Int
     let files: [PKMSFile]
 }
+private struct PKMSDirectory: Decodable { let path: String; let files: [PKMSFile] }
 
 struct PKMSSyncStatus: Decodable {
     let serverRevision: Int
@@ -150,6 +151,7 @@ final class PKMSModel {
     private(set) var deviceCode: String?
     private(set) var verificationURL: URL?
     private(set) var isLoading = false
+    private(set) var isRestoringSession = true
     private(set) var previewURL: URL?
     private(set) var collaborators: [PKMSPeer] = []
 
@@ -160,14 +162,22 @@ final class PKMSModel {
     private var socketSendTask: Task<Void, Never>?
     private var deviceTask: Task<Void, Never>?
     private var cacheTask: Task<Void, Never>?
+    private var flushTask: Task<Void, Never>?
     private var clientID = "ios-\(UUID().uuidString.lowercased())"
+    private(set) var expandedFolders: Set<String> = [""]
 
     init() {
-        serverAddress = UserDefaults.standard.string(forKey: "pkms.serverAddress") ?? "http://localhost:5173"
+        let savedAddress = UserDefaults.standard.string(forKey: "pkms.serverAddress")
+        if let savedAddress, !savedAddress.contains("localhost"), !savedAddress.contains("127.0.0.1") {
+            serverAddress = savedAddress
+        } else {
+            serverAddress = "https://pkms-cloud.lkh0310kr.workers.dev"
+        }
         token = SessionVault.read(for: serverAddress)
     }
 
     func restoreSession() async {
+        defer { isRestoringSession = false }
         guard token != nil else { return }
         do {
             let session = try await get("/api/session", as: PKMSSessionResponse.self)
@@ -234,7 +244,7 @@ final class PKMSModel {
 
     func signOut() async {
         socket?.cancel(with: .goingAway, reason: nil)
-        socketTask?.cancel(); socketSendTask?.cancel(); deviceTask?.cancel()
+        socketTask?.cancel(); socketSendTask?.cancel(); deviceTask?.cancel(); flushTask?.cancel()
         token = nil; user = nil; activeWorkspace = nil; activeFile = nil; document = nil
         workspaces = []; files = []; markdown = ""
         SessionVault.clear(for: serverAddress)
@@ -271,10 +281,12 @@ final class PKMSModel {
         socketTask?.cancel()
         activeWorkspace = workspace
         activeFile = nil; document = nil; markdown = ""; files = []
+        expandedFolders = [""]
         collaborators = []
         do {
             let snapshot = try await get("/api/workspaces/\(workspace.id)/snapshot", as: PKMSSnapshot.self)
             files = snapshot.files
+            await loadDirectory("")
             await refreshSyncStatus()
             connectSocket(workspace)
         } catch { errorMessage = error.localizedDescription }
@@ -308,6 +320,30 @@ final class PKMSModel {
         } catch { errorMessage = error.localizedDescription }
     }
 
+    func toggleFolder(_ file: PKMSFile) async {
+        guard file.kind == "folder" else { return }
+        if expandedFolders.contains(file.path) {
+            expandedFolders.remove(file.path)
+        } else {
+            expandedFolders.insert(file.path)
+            await loadDirectory(file.path)
+        }
+    }
+
+    private func loadDirectory(_ path: String) async {
+        guard let workspace = activeWorkspace,
+              var components = URLComponents(url: endpoint("/api/workspaces/\(workspace.id)/directory"), resolvingAgainstBaseURL: false) else { return }
+        components.queryItems = [URLQueryItem(name: "path", value: path)]
+        guard let url = components.url else { return }
+        do {
+            let result = try await get(url, as: PKMSDirectory.self)
+            guard activeWorkspace?.id == workspace.id else { return }
+            var byID = Dictionary(uniqueKeysWithValues: files.map { ($0.id, $0) })
+            for file in result.files { byID[file.id] = file }
+            files = Array(byID.values)
+        } catch { errorMessage = error.localizedDescription }
+    }
+
     func editMarkdown(_ value: String) {
         guard let doc = document else { markdown = value; return }
         let previous = doc.text as NSString
@@ -331,6 +367,27 @@ final class PKMSModel {
         }
         markdown = doc.text
         if let workspace = activeWorkspace, let file = activeFile { scheduleCache(doc, workspaceID: workspace.id, fileID: file.id) }
+        scheduleFlush()
+    }
+
+    private func scheduleFlush() {
+        flushTask?.cancel()
+        flushTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            await self?.flushNow()
+        }
+    }
+
+    func flushNow() async {
+        flushTask?.cancel()
+        guard let workspace = activeWorkspace else { return }
+        do {
+            let status = try await post("/api/workspaces/\(workspace.id)/flush", body: EmptyBody(), as: PKMSSyncStatus.self)
+            githubStatus = status.githubStatus
+            pendingFiles = status.pendingFiles
+            statusMessage = status.message ?? ""
+        } catch { errorMessage = error.localizedDescription }
     }
 
     func createNote() async {
@@ -410,7 +467,11 @@ final class PKMSModel {
 
     func reloadFiles() async {
         guard let workspace = activeWorkspace else { return }
-        do { files = try await get("/api/workspaces/\(workspace.id)/snapshot", as: PKMSSnapshot.self).files }
+        do {
+            files = try await get("/api/workspaces/\(workspace.id)/snapshot", as: PKMSSnapshot.self).files
+            let folders = expandedFolders.sorted { $0.count < $1.count }
+            for folder in folders { await loadDirectory(folder) }
+        }
         catch { errorMessage = error.localizedDescription }
     }
 
@@ -556,7 +617,7 @@ final class PKMSModel {
     }
 
     private func endpoint(_ path: String) -> URL {
-        let base = URL(string: serverAddress) ?? URL(string: "http://localhost:5173")!
+        let base = URL(string: serverAddress) ?? URL(string: "https://pkms-cloud.lkh0310kr.workers.dev")!
         return URL(string: path, relativeTo: base) ?? base
     }
 
@@ -578,7 +639,9 @@ final class PKMSModel {
 
 private struct EmptyBody: Encodable {}
 private struct ConnectBody: Encodable { let repository: String; let branch: String }
-private struct DevicePollBody: Encodable { let device_code: String; init(deviceCode: String) { device_code = deviceCode } }
+private struct DevicePollBody: Encodable {
+    let deviceCode: String
+}
 
 extension JSONDecoder {
     static var pkms: JSONDecoder {
