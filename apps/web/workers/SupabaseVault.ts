@@ -33,15 +33,17 @@ async function row(env:Env,id:string,login:string):Promise<WorkspaceRow|null>{
 async function files(env:Env,id:string,filter:Record<string,string>,select="*"):Promise<FileRow[]>{
   const q=new URLSearchParams({workspace_id:`eq.${id}`,select,...filter});const r=await supabaseRequest(env,`/rest/v1/pkms_files?${q}`);return r.json() as Promise<FileRow[]>;
 }
-async function upsertFiles(env:Env,items:Record<string,unknown>[]):Promise<void>{
+async function upsertFiles(env:Env,items:Record<string,unknown>[],onStage?:(stage:string)=>void):Promise<void>{
   if(!items.length)return;
   const ids=items.map(item=>String(item.file_id));
   const members=ids.map(id=>`"${id.replaceAll("\\","\\\\").replaceAll('"','\\"')}"`).join(",");
   const q=new URLSearchParams({select:"file_id",workspace_id:`eq.${String(items[0].workspace_id)}`,file_id:`in.(${members})`});
+  onStage?.("file_cache_existing_lookup");
   const existingResponse=await supabaseRequest(env,`/rest/v1/pkms_files?${q}`);
   const existing=new Set((await existingResponse.json() as Array<{file_id:string}>).map(item=>item.file_id));
   const missing=items.filter(item=>!existing.has(String(item.file_id)));
   if(!missing.length)return;
+  onStage?.("file_cache_insert");
   await supabaseRequest(env,"/rest/v1/pkms_files?on_conflict=workspace_id,file_id",{method:"POST",headers:{Prefer:"resolution=ignore-duplicates,return=minimal"},body:JSON.stringify(missing)});
 }
 function fileRecord(f:FileRow){return {id:f.file_id,path:f.path,kind:f.kind,revision:f.revision,...(f.kind!=="folder"?{size:f.size,...(f.kind==="asset"?{contentType:"application/octet-stream"}:{})}:{})};}
@@ -105,11 +107,11 @@ async function directory(env:Env,login:string,w:WorkspaceRow,path:string,request
       if(tree.truncated)return json({error:"directory_too_large",message:"This folder is too large to display in one request."},{status:413});
       const inserts:Record<string,unknown>[]=[];const dirs:Record<string,unknown>[]=[];
       for(const e of tree.tree){if(!validPath(e.path))continue;const p=path?`${path}/${e.path}`:e.path;
-        if(e.type==="tree"){inserts.push({workspace_id:w.workspace_id,file_id:`folder-${p}`,path:p,parent_path:parent(p),kind:"folder",revision:0,deleted:false,dirty:false});dirs.push({workspace_id:w.workspace_id,path:p,tree_sha:e.sha,loaded:false});}
+        if(e.type==="tree"){inserts.push({workspace_id:w.workspace_id,file_id:`folder-${p}`,path:p,parent_path:parent(p),kind:"folder",size:0,sha:null,revision:0,deleted:false,dirty:false});dirs.push({workspace_id:w.workspace_id,path:p,tree_sha:e.sha,loaded:false});}
         else if(e.type==="blob"&&["100644","100755","120000"].includes(e.mode)){const fid=await stableId(w.repository,p);inserts.push({workspace_id:w.workspace_id,file_id:fid,path:p,parent_path:parent(p),kind:isMarkdown(p)?"markdown":"asset",size:e.size??0,sha:e.sha,revision:0,deleted:false,dirty:false});}
       }
       stage="file_cache_upsert";
-      await upsertFiles(env,inserts);
+      await upsertFiles(env,inserts,value=>{stage=value;});
       if(dirs.length){stage="directory_cache_upsert";await supabaseRequest(env,"/rest/v1/pkms_directories?on_conflict=workspace_id,path",{method:"POST",headers:{Prefer:"resolution=ignore-duplicates,return=minimal"},body:JSON.stringify(dirs)});}
       stage="mark_directory_loaded";
       await supabaseRequest(env,`/rest/v1/pkms_directories?workspace_id=eq.${encodeURIComponent(w.workspace_id)}&path=eq.${encodeURIComponent(path)}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify({loaded:true})});
