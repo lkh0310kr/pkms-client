@@ -12,6 +12,7 @@ const SUPPORTED_PROTOCOLS = new Set(["2025-03-26", "2025-06-18", "2025-11-25"]);
 type Stored<T> = { value: T; expiresAt: number };
 type OAuthClient = { clientId: string; clientName: string; redirectUris: string[] };
 type AuthorizeRequest = { kind: "authorize"; clientId: string; redirectUri: string; clientState: string; challenge: string; scope: string[]; loginNonce: string };
+type StartedAuthorize = { kind: "started"; githubState: string };
 type AuthorizationCode = { kind: "code"; clientId: string; redirectUri: string; challenge: string; scope: string[]; login: string; avatarUrl?: string };
 type Dependencies = {
   dispatchApi: (request: Request, env: Env, requestId: string) => Promise<Response>;
@@ -46,6 +47,14 @@ async function revokeMcpToken(env: Env, tokenId: string): Promise<void> {
 }
 
 function urlFor(env: Env, path: string): string { return new URL(path, env.PUBLIC_ORIGIN).toString(); }
+
+function githubAuthorizationUrl(env: Env, state: string): string {
+  const target = new URL("https://github.com/login/oauth/authorize");
+  target.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
+  target.searchParams.set("redirect_uri", urlFor(env, "/api/auth/github/callback"));
+  target.searchParams.set("state", state);
+  return target.toString();
+}
 
 function htmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
@@ -325,8 +334,13 @@ async function oauthRoute(request: Request, env: Env): Promise<Response | null> 
     }
     const transaction = await get<AuthorizeRequest>(env, `request:${nonce}`);
     if (!transaction || transaction.kind !== "authorize") {
+      const started = await get<StartedAuthorize>(env, `started:${nonce}`);
+      if (started?.kind === "started") {
+        console.info("mcp_oauth_authorize_replayed");
+        return new Response(null, { status: 303, headers: { Location: githubAuthorizationUrl(env, started.githubState), "Cache-Control": "no-store" } });
+      }
       console.warn("mcp_oauth_authorize_rejected", { reason: "transaction_missing" });
-      return html("<h1>Authorization already started</h1><p>This approval was already submitted or expired. Return to Codex and start a new PKMS sign-in if it is still waiting.</p>");
+      return html("<h1>Sign-in expired</h1><p>Return to Codex and start a new PKMS sign-in.</p>");
     }
     const clientId = transaction.clientId;
     const redirectUri = transaction.redirectUri;
@@ -350,11 +364,8 @@ async function oauthRoute(request: Request, env: Env): Promise<Response | null> 
     }
     const githubState = randomToken(24);
     await put(env, `github:${githubState}`, transaction, Date.now() + 10 * 60 * 1000);
-    const target = new URL("https://github.com/login/oauth/authorize");
-    target.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
-    target.searchParams.set("redirect_uri", urlFor(env, "/api/auth/github/callback"));
-    target.searchParams.set("state", githubState);
-    return new Response(null, { status: 302, headers: { Location: target.toString(), "Set-Cookie": `__Host-pkms_oauth=${githubState}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600` } });
+    await put<StartedAuthorize>(env, `started:${nonce}`, { kind: "started", githubState }, Date.now() + 10 * 60 * 1000);
+    return new Response(null, { status: 303, headers: { Location: githubAuthorizationUrl(env, githubState), "Cache-Control": "no-store", "Set-Cookie": `__Host-pkms_oauth=${githubState}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600` } });
   }
   if (url.pathname === "/oauth/token" && request.method === "POST") {
     const form = await request.formData();
