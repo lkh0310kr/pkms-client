@@ -67,6 +67,19 @@ function matchesExcludePattern(path: string, pattern: string): boolean {
 
 interface TreeRow { file: FileRecord; depth: number }
 interface TreeContextMenu { file: FileRecord; x: number; y: number }
+function treeSelectionRoots(files: FileRecord[], selectedPaths: Set<string>): FileRecord[] {
+  const folders = new Set(files.filter((file) => file.kind === "folder" && selectedPaths.has(file.path)).map((file) => file.path));
+  return files.filter((file) => {
+    if (!selectedPaths.has(file.path)) return false;
+    let parent = parentPath(file.path);
+    while (parent) { if (folders.has(parent)) return false; parent = parentPath(parent); }
+    return true;
+  });
+}
+function parseTreeDragPaths(data: string): string[] {
+  try { const paths: unknown = JSON.parse(data); return Array.isArray(paths) ? paths.filter((path): path is string => typeof path === "string") : []; }
+  catch { return []; }
+}
 function flattenTree(files: FileRecord[], expanded: Set<string>): TreeRow[] {
   const children = new Map<string, FileRecord[]>();
   for (const file of files) {
@@ -120,6 +133,10 @@ export default function Home() {
   const [loadedFolders, setLoadedFolders] = useState<Set<string>>(() => new Set());
   const [focusedTreePath, setFocusedTreePath] = useState<string | null>(null);
   const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenu | null>(null);
+  const [selectedTreePaths, setSelectedTreePaths] = useState<Set<string>>(() => new Set());
+  const [selectionAnchorPath, setSelectionAnchorPath] = useState<string | null>(null);
+  const [treeDropTarget, setTreeDropTarget] = useState<string | null>(null);
+  const [cutTreePaths, setCutTreePaths] = useState<Set<string>>(() => new Set());
   const [showHiddenFiles, setShowHiddenFiles] = useState(false);
   const [excludedPatterns, setExcludedPatterns] = useState("");
   const [showFileFilters, setShowFileFilters] = useState(false);
@@ -563,6 +580,7 @@ export default function Home() {
     if (activeWorkspace?.id !== workspace.id) {
       clearActiveFile();
       setCurrentFolder("");
+      setSelectedTreePaths(new Set()); setCutTreePaths(new Set()); setSelectionAnchorPath(null);
       setExpandedFolders(new Set([""]));
       setLoadedFolders(new Set());
       setActiveWorkspace(workspace);
@@ -622,6 +640,7 @@ export default function Home() {
 
   const chooseWorkspace = (workspace: Workspace) => {
     setActiveWorkspace(workspace); clearActiveFile(); setCurrentFolder(""); setExpandedFolders(new Set([""])); setLoadedFolders(new Set());
+    setSelectedTreePaths(new Set()); setCutTreePaths(new Set()); setSelectionAnchorPath(null);
     routedPath.current = null;
     navigate("/", { preventScrollReset: true });
   };
@@ -641,6 +660,7 @@ export default function Home() {
       const result = await api<{ workspace: Workspace }>("/api/workspaces", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repository: repository.fullName, branch: repository.defaultBranch }) });
       setShowRepositories(false);
       clearActiveFile(); setCurrentFolder(""); setExpandedFolders(new Set([""])); setLoadedFolders(new Set());
+      setSelectedTreePaths(new Set()); setCutTreePaths(new Set()); setSelectionAnchorPath(null);
       await refreshWorkspaces();
       setActiveWorkspace(result.workspace);
       routedPath.current = null;
@@ -711,6 +731,27 @@ export default function Home() {
     localStorage.setItem(key, JSON.stringify({ ...saved, scrollTop }));
   };
 
+  const selectTreeRow = (path: string, index: number, additive = false, range = false) => {
+    setFocusedTreePath(path);
+    if (range) {
+      const anchor = treeRows.findIndex((row) => row.file.path === (selectionAnchorPath ?? path));
+      const from = anchor < 0 ? index : anchor;
+      const paths = treeRows.slice(Math.min(from, index), Math.max(from, index) + 1).map((row) => row.file.path);
+      setSelectedTreePaths((current) => new Set([...(additive ? current : []), ...paths]));
+      if (!selectionAnchorPath) setSelectionAnchorPath(path);
+    } else if (additive) {
+      setSelectedTreePaths((current) => {
+        const next = new Set(current);
+        if (next.has(path)) next.delete(path); else next.add(path);
+        return next;
+      });
+      setSelectionAnchorPath(path);
+    } else {
+      setSelectedTreePaths(new Set([path]));
+      setSelectionAnchorPath(path);
+    }
+  };
+
   const handleTreeKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     const index = treeRows.findIndex((row) => row.file.path === focusedTreePath);
     const row = treeRows[index];
@@ -720,9 +761,39 @@ export default function Home() {
       setFocusedTreePath(next.file.path);
       requestAnimationFrame(() => treeRef.current?.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(next.file.path)}"]`)?.focus());
     };
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      setSelectedTreePaths(new Set(treeRows.map((item) => item.file.path)));
+      setSelectionAnchorPath(row.file.path);
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "x") {
+      event.preventDefault();
+      setCutTreePaths(new Set(selectedTreePaths));
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "v" && cutTreePaths.size) {
+      event.preventDefault();
+      void moveTreeItems(files.filter((file) => cutTreePaths.has(file.path)), currentFolder);
+      return;
+    }
+    if (event.key === "Delete" || event.key === "Backspace") {
+      if (selectedTreePaths.size) { event.preventDefault(); void deleteTreeItems(treeRows.filter((item) => selectedTreePaths.has(item.file.path)).map((item) => item.file)); }
+      return;
+    }
+    if (event.key === "F2" && selectedTreePaths.size === 1) {
+      event.preventDefault();
+      const selected = files.find((file) => selectedTreePaths.has(file.path));
+      if (selected) renameTreeItem(selected);
+      return;
+    }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      focusRow(treeRows[index + (event.key === "ArrowDown" ? 1 : -1)]);
+      const nextIndex = index + (event.key === "ArrowDown" ? 1 : -1);
+      const next = treeRows[nextIndex];
+      if (event.shiftKey && next) selectTreeRow(next.file.path, nextIndex, true, true);
+      else if (next) selectTreeRow(next.file.path, nextIndex);
+      focusRow(next);
     } else if (event.key === "ArrowRight" && row.file.kind === "folder") {
       event.preventDefault();
       if (!expandedFolders.has(row.file.path)) void toggleFolder(row.file);
@@ -741,6 +812,8 @@ export default function Home() {
   const quickOpenResults = [...new Map(visibleFiles.filter((file) => file.kind !== "folder").map((file) => [file.id, file])).values()]
     .filter((file) => !quickQuery.trim() || file.path.toLocaleLowerCase().includes(quickQuery.trim().toLocaleLowerCase()))
     .slice(0, 30);
+  const contextMoveSources = treeRows.filter((row) => selectedTreePaths.has(row.file.path)).map((row) => row.file);
+  const contextMoveRoots = treeSelectionRoots(contextMoveSources, new Set(contextMoveSources.map((file) => file.path)));
 
   const updateFilePath = async (file: FileRecord, toPath: string) => {
     if (!activeWorkspace) return;
@@ -760,15 +833,81 @@ export default function Home() {
         navigate(target, { replace: true, preventScrollReset: true });
       }
       const destination = result.conflictCopyPath ?? toPath;
+      const movePath = (path: string) => file.kind === "folder"
+        ? (path === file.path || path.startsWith(`${file.path}/`) ? `${destination}${path.slice(file.path.length)}` : path)
+        : path === file.path ? destination : path;
       if (file.kind === "folder" && (currentFolder === file.path || currentFolder.startsWith(`${file.path}/`))) {
         setCurrentFolder(`${destination}${currentFolder.slice(file.path.length)}`);
       }
       if (file.kind === "folder") {
-        const movePath = (path: string) => path === file.path || path.startsWith(`${file.path}/`) ? `${destination}${path.slice(file.path.length)}` : path;
         setExpandedFolders((current) => new Set([...current].map(movePath)));
         setLoadedFolders((current) => new Set([...current].map(movePath)));
       }
+      setSelectedTreePaths((current) => new Set([...current].map(movePath)));
+      setCutTreePaths((current) => new Set([...current].map(movePath)));
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not rename item"); }
+  };
+
+  const moveTreeItems = async (items: FileRecord[], destination: string) => {
+    if (!activeWorkspace || !items.length) return;
+    const roots = treeSelectionRoots(items, new Set(items.map((file) => file.path)));
+    const moves = roots.map((file) => ({ file, toPath: `${destination ? `${destination}/` : ""}${entryName(file.path)}` }))
+      .filter(({ file, toPath }) => toPath !== file.path);
+    if (!moves.length) { setTreeContextMenu(null); return; }
+    const invalid = moves.find(({ file }) => file.kind === "folder" && destination.startsWith(`${file.path}/`));
+    if (invalid) { setError("A folder cannot be moved into itself or one of its subfolders."); setTreeContextMenu(null); return; }
+    if (destination && !files.some((file) => file.path === destination && file.kind === "folder")) {
+      setError("Destination folder is not available in the file tree."); setTreeContextMenu(null); return;
+    }
+    setTreeContextMenu(null);
+    setError("");
+    const resolvedMoves: Array<{ file: FileRecord; destination: string }> = [];
+    try {
+      for (const move of moves) {
+        const result = await api<{ conflictCopyPath?: string }>(`/api/workspaces/${activeWorkspace.id}/operations`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "move", fileId: move.file.id, toPath: move.toPath } }),
+        });
+        resolvedMoves.push({ file: move.file, destination: result.conflictCopyPath ?? move.toPath });
+      }
+      const snapshot = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`);
+      setFiles(snapshot.files);
+      const pathAfterMove = (path: string) => {
+        const move = resolvedMoves.find(({ file }) => file.kind === "folder" && (path === file.path || path.startsWith(`${file.path}/`)));
+        if (move) return `${move.destination}${path.slice(move.file.path.length)}`;
+        const exact = resolvedMoves.find(({ file }) => file.path === path);
+        return exact?.destination ?? path;
+      };
+      setCurrentFolder((path) => pathAfterMove(path));
+      setExpandedFolders((paths) => new Set([...paths].map(pathAfterMove)));
+      setLoadedFolders((paths) => new Set([...paths].map(pathAfterMove)));
+      const movedActive = activeFile ? snapshot.files.find((file) => file.id === activeFile.id) : null;
+      if (movedActive && movedActive.path !== activeFile?.path) {
+        setActiveFile(movedActive);
+        const target = fileLocationPath(activeWorkspace.id, movedActive.path);
+        routedPath.current = target;
+        navigate(target, { replace: true, preventScrollReset: true });
+      }
+      setSelectedTreePaths(new Set(resolvedMoves.map((move) => move.destination)));
+      setCutTreePaths(new Set());
+      setFocusedTreePath(resolvedMoves[0]?.destination ?? null);
+      if (resolvedMoves.some((move, index) => move.destination !== moves[index]?.toPath)) setNotice("Name conflict resolved while moving items.");
+    } catch (cause) {
+      try {
+        const snapshot = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`);
+        setFiles(snapshot.files);
+        setSelectedTreePaths(new Set());
+        setCurrentFolder((path) => { let next = path; while (next && !snapshot.files.some((file) => file.kind === "folder" && file.path === next)) next = parentPath(next); return next; });
+        const current = activeFile ? snapshot.files.find((file) => file.id === activeFile.id) : null;
+        if (current && current.path !== activeFile?.path) {
+          setActiveFile(current);
+          const target = fileLocationPath(activeWorkspace.id, current.path);
+          routedPath.current = target;
+          navigate(target, { replace: true, preventScrollReset: true });
+        }
+      } catch { /* Keep the original operation error visible. */ }
+      setError(`${resolvedMoves.length ? "Some items may have moved. The tree was refreshed. " : ""}${cause instanceof Error ? cause.message : "Could not move selected items"}`);
+    }
   };
 
   const renameActiveFile = () => {
@@ -796,28 +935,49 @@ export default function Home() {
     void updateFilePath(file, `${parent ? `${parent}/` : ""}${name.trim()}`);
   };
 
-  const deleteTreeItem = async (file: FileRecord) => {
+  const deleteTreeItems = async (filesToDelete: FileRecord[]) => {
     setTreeContextMenu(null);
-    if (!activeWorkspace || !window.confirm(`Delete ${entryName(file.path)}?`)) return;
+    if (!activeWorkspace || !filesToDelete.length) return;
+    const roots = treeSelectionRoots(filesToDelete, new Set(filesToDelete.map((file) => file.path)));
+    const prompt = roots.length === 1 ? `Delete ${entryName(roots[0].path)}?` : `Delete ${roots.length} selected items?`;
+    if (!window.confirm(prompt)) return;
     try {
-      await api(`/api/workspaces/${activeWorkspace.id}/operations`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "delete", fileId: file.id } }),
-      });
-      const isInside = (path: string) => path === file.path || (file.kind === "folder" && path.startsWith(`${file.path}/`));
-      setFiles((current) => current.filter((entry) => !isInside(entry.path)));
-      if (file.kind === "folder") {
-        setExpandedFolders((current) => new Set([...current].filter((path) => !isInside(path))));
-        setLoadedFolders((current) => new Set([...current].filter((path) => !isInside(path))));
+      for (const file of roots) {
+        await api(`/api/workspaces/${activeWorkspace.id}/operations`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "delete", fileId: file.id } }),
+        });
       }
-      if (currentFolder && isInside(currentFolder)) setCurrentFolder(parentPath(file.path));
-      if (activeFile && isInside(activeFile.path)) {
+      const isInsideDeleted = (path: string) => roots.some((file) => path === file.path || (file.kind === "folder" && path.startsWith(`${file.path}/`)));
+      setFiles((current) => current.filter((entry) => !isInsideDeleted(entry.path)));
+      setExpandedFolders((current) => new Set([...current].filter((path) => !isInsideDeleted(path))));
+      setLoadedFolders((current) => new Set([...current].filter((path) => !isInsideDeleted(path))));
+      if (currentFolder && isInsideDeleted(currentFolder)) setCurrentFolder(parentPath(roots.find((file) => currentFolder === file.path || currentFolder.startsWith(`${file.path}/`))?.path ?? currentFolder));
+      if (activeFile && isInsideDeleted(activeFile.path)) {
         clearActiveFile();
         routedPath.current = null;
         navigate("/", { replace: true, preventScrollReset: true });
       }
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not delete item"); }
+      setSelectedTreePaths(new Set());
+    } catch (cause) {
+      try {
+        const snapshot = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`);
+        setFiles(snapshot.files);
+        setSelectedTreePaths(new Set());
+        setExpandedFolders((current) => new Set([...current].filter((path) => snapshot.files.some((file) => file.kind === "folder" && file.path === path))));
+        setLoadedFolders((current) => new Set([...current].filter((path) => snapshot.files.some((file) => file.kind === "folder" && file.path === path))));
+        if (activeFile && !snapshot.files.some((file) => file.id === activeFile.id)) {
+          clearActiveFile(); routedPath.current = null; navigate("/", { replace: true, preventScrollReset: true });
+        }
+        setCurrentFolder((path) => { let next = path; while (next && !snapshot.files.some((file) => file.kind === "folder" && file.path === next)) next = parentPath(next); return next; });
+      } catch { /* Keep the original operation error visible. */ }
+      setError(`${roots.length > 1 ? "Some selected items may have been deleted. " : ""}${cause instanceof Error ? cause.message : "Could not delete item"}`);
+    }
   };
+
+  const deleteTreeItem = (file: FileRecord) => void deleteTreeItems(selectedTreePaths.has(file.path)
+    ? treeRows.filter((row) => selectedTreePaths.has(row.file.path)).map((row) => row.file)
+    : [file]);
 
   const openTreeItem = (file: FileRecord) => {
     setTreeContextMenu(null);
@@ -882,8 +1042,8 @@ export default function Home() {
         {activeWorkspace && <>
           <div className="file-toolbar"><span className="eyebrow">Files</span><div className="toolbar-actions">
             <button className={`mini-button visibility-button${showFileFilters ? " active" : ""}`} title="File visibility settings" aria-label="File visibility settings" aria-expanded={showFileFilters} onClick={() => setShowFileFilters((open) => !open)}><AppIcon name="filter" /></button>
-            <button className="mini-button" title="New note" onClick={newNote}><AppIcon name="filePlus" /></button>
-            <button className="mini-button" title="New folder" onClick={newFolder}><AppIcon name="folderPlus" /></button>
+            <button className="mini-button" title="New note" onClick={() => void newNote()}><AppIcon name="filePlus" /></button>
+            <button className="mini-button" title="New folder" onClick={() => void newFolder()}><AppIcon name="folderPlus" /></button>
             <label className="mini-button upload-button" title="Upload file"><AppIcon name="upload" /><input type="file" onChange={(event) => { void uploadFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
             {activeFile && <button className="mini-button" title="Rename" onClick={renameActiveFile}><AppIcon name="pencil" /></button>}
             {activeFile && <button className="mini-button" title="Delete" onClick={() => void deleteActiveFile()}><AppIcon name="trash" /></button>}
@@ -891,26 +1051,49 @@ export default function Home() {
             {!activeFile && currentFolder && <button className="mini-button" title="Delete folder" onClick={() => void deleteCurrentFolder()}><AppIcon name="trash" /></button>}
           </div></div>
           {showFileFilters && <div className="file-filter-panel"><div className="file-filter-heading"><span>Show hidden files</span><button className={`mini-button visibility-button${showHiddenFiles ? " active" : ""}`} aria-pressed={showHiddenFiles} onClick={() => { const next = !showHiddenFiles; setShowHiddenFiles(next); localStorage.setItem(`pkms:show-hidden:${activeWorkspace.id}`, String(next)); }}>{showHiddenFiles ? "On" : "Off"}</button></div><label htmlFor="excluded-files">Exclude paths</label><textarea id="excluded-files" value={excludedPatterns} placeholder={"*.tmp\n**/drafts/**"} spellCheck={false} onChange={(event) => { const next = event.target.value; setExcludedPatterns(next); localStorage.setItem(`pkms:excluded-files:${activeWorkspace.id}`, next); }} /><p>One glob per line</p></div>}
-          <nav ref={treeRef} className="file-list file-tree" role="tree" aria-label="Repository files" aria-busy={loadingFolder} onKeyDown={handleTreeKeyDown} onScroll={(event) => persistTreeScroll(event.currentTarget.scrollTop)}>
+          <nav ref={treeRef} className={`file-list file-tree${treeDropTarget === "" ? " tree-root-drop" : ""}`} role="tree" aria-multiselectable="true" aria-label="Repository files" aria-busy={loadingFolder} onKeyDown={handleTreeKeyDown} onScroll={(event) => persistTreeScroll(event.currentTarget.scrollTop)} onDragOver={(event) => { event.preventDefault(); if (event.target === event.currentTarget) setTreeDropTarget(""); }} onDragLeave={(event) => { if (event.target === event.currentTarget) setTreeDropTarget(null); }} onDrop={(event) => { if (event.target !== event.currentTarget) return; event.preventDefault(); event.stopPropagation(); setTreeDropTarget(null); const paths = parseTreeDragPaths(event.dataTransfer.getData("application/x-pkms-tree-paths")); void moveTreeItems(files.filter((file) => paths.includes(file.path)), ""); }}>
             {treeRows.map(({ file, depth }, index) => <button
               key={file.id}
               type="button"
               role="treeitem"
               data-tree-path={file.path}
+              aria-selected={selectedTreePaths.has(file.path)}
               aria-level={depth + 1}
               aria-expanded={file.kind === "folder" ? expandedFolders.has(file.path) : undefined}
               tabIndex={focusedTreePath === file.path || (!focusedTreePath && index === 0) ? 0 : -1}
-              className={`tree-row ${file.kind === "folder" ? "folder-row" : "file-row"}${file.path === currentFolder && file.kind === "folder" ? " selected" : ""}${activeFile?.id === file.id ? " selected" : ""}`}
+              draggable
+              className={`tree-row ${file.kind === "folder" ? "folder-row" : "file-row"}${file.path === currentFolder && file.kind === "folder" ? " selected" : ""}${activeFile?.id === file.id ? " selected" : ""}${selectedTreePaths.has(file.path) ? " multi-selected" : ""}${cutTreePaths.has(file.path) ? " cut-pending" : ""}${treeDropTarget === file.path ? " drop-target" : ""}`}
               style={{ paddingLeft: 8 + depth * 14 }}
               onFocus={() => setFocusedTreePath(file.path)}
+              onDragStart={(event) => {
+                const selected = selectedTreePaths.has(file.path) ? treeRows.filter((row) => selectedTreePaths.has(row.file.path)).map((row) => row.file) : [file];
+                const roots = treeSelectionRoots(selected, new Set(selected.map((entry) => entry.path)));
+                event.dataTransfer.setData("application/x-pkms-tree-paths", JSON.stringify(roots.map((entry) => entry.path)));
+                event.dataTransfer.effectAllowed = "move";
+                if (!selectedTreePaths.has(file.path)) selectTreeRow(file.path, index);
+              }}
+              onDragOver={(event) => { if (file.kind !== "folder") return; event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move"; setTreeDropTarget(file.path); }}
+              onDragLeave={(event) => { if (file.kind === "folder" && !event.currentTarget.contains(event.relatedTarget as Node)) setTreeDropTarget(null); }}
+              onDrop={(event) => {
+                if (file.kind !== "folder") return;
+                event.preventDefault(); event.stopPropagation(); setTreeDropTarget(null);
+                const paths = parseTreeDragPaths(event.dataTransfer.getData("application/x-pkms-tree-paths"));
+                void moveTreeItems(files.filter((entry) => paths.includes(entry.path)), file.path);
+              }}
               onContextMenu={(event) => {
                 event.preventDefault();
                 event.currentTarget.focus();
                 setFocusedTreePath(file.path);
-                const menuHeight = file.kind === "folder" ? 176 : 104;
+                if (!selectedTreePaths.has(file.path)) { setSelectedTreePaths(new Set([file.path])); setSelectionAnchorPath(file.path); }
+                const menuHeight = file.kind === "folder" ? 240 : 136;
                 setTreeContextMenu({ file, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 196)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)) });
               }}
-              onClick={() => file.kind === "folder" ? void toggleFolder(file) : void openFile(file)}
+              onClick={(event) => {
+                const additive = event.metaKey || event.ctrlKey;
+                if (additive || event.shiftKey) { selectTreeRow(file.path, index, additive, event.shiftKey); return; }
+                selectTreeRow(file.path, index);
+                if (file.kind === "folder") void toggleFolder(file); else void openFile(file);
+              }}
             >
               <span className={`tree-chevron${expandedFolders.has(file.path) ? " expanded" : ""}`} aria-hidden="true">{file.kind === "folder" && <AppIcon name="chevron" />}</span>
               <span className="file-icon" aria-hidden="true"><AppIcon name={file.kind === "folder" ? "folder" : file.kind === "markdown" ? "fileText" : "file"} /></span>
@@ -923,7 +1106,9 @@ export default function Home() {
             {treeContextMenu.file.kind === "folder" && <>
               <button role="menuitem" onClick={() => { const directory = treeContextMenu.file.path; setTreeContextMenu(null); void newNote(directory); }}>New note</button>
               <button role="menuitem" onClick={() => { const directory = treeContextMenu.file.path; setTreeContextMenu(null); void newFolder(directory); }}>New folder</button>
+              {contextMoveRoots.some((item) => item.path !== treeContextMenu.file.path && parentPath(item.path) !== treeContextMenu.file.path && !(item.kind === "folder" && treeContextMenu.file.path.startsWith(`${item.path}/`))) && <button role="menuitem" onClick={() => void moveTreeItems(contextMoveRoots, treeContextMenu.file.path)}>Move selection here</button>}
             </>}
+            <button role="menuitem" onClick={() => { setCutTreePaths(new Set(contextMoveRoots.map((item) => item.path))); setTreeContextMenu(null); }}>Cut</button>
             <button role="menuitem" onClick={() => renameTreeItem(treeContextMenu.file)}>Rename</button>
             <button className="danger" role="menuitem" onClick={() => void deleteTreeItem(treeContextMenu.file)}>Delete</button>
           </div>}
@@ -948,7 +1133,7 @@ export default function Home() {
           <div className="repository-list">{repositories.map((repository) => <button key={repository.fullName} className="repository-option" onClick={() => void connectRepository(repository)}><span className="repo-icon"><AppIcon name={repository.private ? "lock" : "folder"} /></span><span><strong>{repository.fullName}</strong><small>{repository.defaultBranch} · {repository.private ? "Private" : "Public"}</small></span><span className="option-arrow"><AppIcon name="arrowRight" /></span></button>)}{!repositories.length && <p className="empty-hint">No writable repositories found.</p>}</div>
         </section></div>}
         {quickOpen && <div className="modal-backdrop quick-open-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickOpen(false); }}><section className="quick-open-modal" role="dialog" aria-modal="true" aria-label="Quick open"><input ref={quickOpenInput} value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} placeholder="Search open and loaded files…" onKeyDown={(event) => { if (event.key === "Escape") setQuickOpen(false); else if (event.key === "Enter" && quickOpenResults[0]) { void openFile(quickOpenResults[0]); setQuickOpen(false); } }} /><div className="quick-open-results">{quickOpenResults.map((file) => <button key={file.id} onClick={() => { void openFile(file); setQuickOpen(false); }}><span>{entryName(file.path)}</span><small>{file.path}</small></button>)}{!quickOpenResults.length && <p className="empty-hint">No loaded files found</p>}</div></section></div>}
-        {!activeWorkspace ? <div className="empty-workspace"><h2>No workspace</h2><button className="primary-button" onClick={openRepositoryPicker}>Connect repository</button></div> : !activeFile ? <div className="empty-workspace"><h2>No file open</h2><button className="primary-button" onClick={newNote}>New note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout" onPointerMove={(event) => { const next = event.currentTarget.getBoundingClientRect().right - event.clientX < 48; setOutlineHover((current) => current === next ? current : next); }} onPointerLeave={() => setOutlineHover(false)}>
+        {!activeWorkspace ? <div className="empty-workspace"><h2>No workspace</h2><button className="primary-button" onClick={openRepositoryPicker}>Connect repository</button></div> : !activeFile ? <div className="empty-workspace"><h2>No file open</h2><button className="primary-button" onClick={() => void newNote()}>New note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout" onPointerMove={(event) => { const next = event.currentTarget.getBoundingClientRect().right - event.clientX < 48; setOutlineHover((current) => current === next ? current : next); }} onPointerLeave={() => setOutlineHover(false)}>
           <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div></div>
           <div className="outline-control outline-rail"><button className={`mini-button outline-button${outlineOpen ? " active" : ""}${outlineHover || outlineOpen ? " revealed" : ""}`} title="Note outline" aria-label="Note outline" aria-expanded={outlineOpen} onClick={() => setOutlineOpen((open) => !open)}><AppIcon name="list" /></button>{outlineOpen && <div className="outline-popover" role="navigation" aria-label="Note outline">{outlineItems.length ? outlineItems.map((item) => <button key={`${item.line}-${item.title}`} style={{ paddingLeft: 8 + (item.level - 1) * 11 }} title={item.title} onClick={() => { setOutlineOpen(false); requestAnimationFrame(() => editorNavigate.current?.(item.line)); }}>{item.title}</button>) : <span>No headings</span>}</div>}</div>
           <div className="editor-columns"><div className="source-column"><Suspense fallback={<div className="editor-loading">Opening editor…</div>}><MarkdownCodeEditor key={activeFile.id} value={text} onChange={handleText} onNavigateReady={registerEditorNavigator} /></Suspense></div></div>
