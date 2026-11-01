@@ -60,11 +60,12 @@ function htmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
 }
 
-function html(body: string, headers?: HeadersInit): Response {
+function html(body: string, headers?: HeadersInit, formActionOrigin?: string): Response {
   const result = new Headers(headers);
   result.set("Content-Type", "text/html; charset=utf-8");
   result.set("Cache-Control", "no-store");
-  result.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+  const formAction = formActionOrigin ? ` 'self' ${new URL(formActionOrigin).origin}` : " 'self'";
+  result.set("Content-Security-Policy", `default-src 'none'; style-src 'unsafe-inline'; form-action${formAction}; base-uri 'none'; frame-ancestors 'none'`);
   return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Connect PKMS</title><body style="font:16px system-ui;max-width:34rem;margin:12vh auto;padding:0 1.25rem;color:#202124"><main>${body}</main></body></html>`, { headers: result });
 }
 
@@ -320,7 +321,7 @@ async function oauthRoute(request: Request, env: Env): Promise<Response | null> 
     if (scopes.some((scope) => !SCOPES.has(scope)) || !scopes.includes("pkms:read")) return oauthError(request, env, "invalid_scope", state);
     const nonce = randomToken(24);
     await put<AuthorizeRequest>(env, `request:${nonce}`, { kind: "authorize", clientId, redirectUri, clientState: state, challenge: codeChallenge, scope: scopes, loginNonce: nonce }, Date.now() + 10 * 60 * 1000);
-    return html(`<h1>Connect PKMS</h1><p><strong>${htmlEscape(client.clientName)}</strong> requests access to your PKMS workspace.</p><p>Permissions: ${htmlEscape(scopes.join(", "))}</p><p>File contents you choose to read may be sent to the AI service connected to this MCP client.</p><form method="post" action="/oauth/authorize"><input type="hidden" name="nonce" value="${nonce}"><button name="approve" value="yes">Continue with GitHub</button><button name="approve" value="no">Cancel</button></form>`);
+    return html(`<h1>Connect PKMS</h1><p><strong>${htmlEscape(client.clientName)}</strong> requests access to your PKMS workspace.</p><p>Permissions: ${htmlEscape(scopes.join(", "))}</p><p>File contents you choose to read may be sent to the AI service connected to this MCP client.</p><form method="post" action="${htmlEscape(urlFor(env, "/oauth/authorize"))}"><input type="hidden" name="nonce" value="${nonce}"><button name="approve" value="yes">Continue with GitHub</button><button name="approve" value="no">Cancel</button></form>`, undefined, env.PUBLIC_ORIGIN);
   }
   if (url.pathname === "/oauth/authorize" && request.method === "POST") {
     if (request.headers.get("Origin") !== new URL(env.PUBLIC_ORIGIN).origin) return json({ error: "origin_mismatch" }, { status: 403 });
