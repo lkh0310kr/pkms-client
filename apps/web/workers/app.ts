@@ -338,44 +338,56 @@ interface LegacyVaultExport { metadata: Record<string,string>; files: LegacyFile
 async function migrateLegacyState(request: Request, env: Env): Promise<Response> {
   if (!env.MIGRATION_SECRET || request.headers.get("Authorization") !== `Bearer ${env.MIGRATION_SECRET}`) return json({ error: "unauthorized" }, { status: 401 });
   if (env.PKMS_MAINTENANCE !== "true") return json({ error: "maintenance_lock_required" }, { status: 409 });
+  let stage = "account_export";
   try {
     const legacyAccount = env.ACCOUNTS.get(env.ACCOUNTS.idFromName("lkh0310kr"));
     const exported = await legacyAccount.fetch("https://account/__migration/export");
-    if (!exported.ok) throw new Error("legacy_account_export_failed");
+    if (!exported.ok) throw Object.assign(new Error("legacy_account_export_failed"), { code: `legacy_account_http_${exported.status}` });
     const accountRows = await exported.json() as Array<{key:string;value:string}>;
     let workspaceRecords: WorkspaceRecord[] = [];
     for (const item of accountRows) {
       if (item.key === "credentials") {
+        stage = "account_credentials_import";
         await supabaseRequest(env,"/rest/v1/pkms_account_values?on_conflict=account_login,value_key",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify({account_login:"lkh0310kr",value_key:"credentials",value:JSON.parse(item.value)})});
       } else if (item.key === "workspaces") {
         workspaceRecords = JSON.parse(item.value) as WorkspaceRecord[];
       } else if (item.key.startsWith("mcp:")) {
+        stage = "mcp_oauth_import";
         const parsed = JSON.parse(item.value) as {value:unknown;expiresAt:number};
         await supabaseRequest(env,"/rest/v1/pkms_account_values?on_conflict=account_login,value_key",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify({account_login:"__pkms_mcp_oauth__",value_key:item.key,value:parsed})});
       }
     }
     let migratedWorkspaces=0,migratedFiles=0,migratedDocuments=0;
     for (const workspace of workspaceRecords) {
+      stage = "workspace_export";
       const room=env.VAULT_ROOMS.get(env.VAULT_ROOMS.idFromName(workspace.id));
       const response=await room.fetch("https://room/__migration/export");
-      if(!response.ok)throw new Error("legacy_workspace_export_failed");
+      if(!response.ok)throw Object.assign(new Error("legacy_workspace_export_failed"),{code:`legacy_workspace_http_${response.status}`});
       const state=await response.json() as LegacyVaultExport;
       const metadata=state.metadata;
       if(!metadata.repository||!metadata.branch||!metadata.head||!metadata.tree)continue;
       const hasPendingChanges=state.files.some(file=>Boolean(file.dirty)||Boolean(file.deleted));
+      stage = "workspace_initialize";
       await supabaseRpc(env,"pkms_initialize_workspace",{p_workspace_id:workspace.id,p_owner_login:"lkh0310kr",p_repository:metadata.repository,p_branch:metadata.branch,p_head:metadata.head,p_tree_sha:metadata.tree});
+      stage = "workspace_metadata_import";
       await supabaseRequest(env,`/rest/v1/pkms_workspaces?workspace_id=eq.${encodeURIComponent(workspace.id)}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify({server_revision:Number(metadata.revision??workspace.revision),github_status:hasPendingChanges?"pending":metadata.githubStatus??workspace.githubStatus,github_message:metadata.githubMessage||null,last_github_commit_at:metadata.lastGitHubCommitAt||null,flush_due_at:(metadata.githubStatus==="pending"||hasPendingChanges)?new Date(Date.now()+15*60_000).toISOString():null})});
+      stage = "directory_import";
       await supabaseRequest(env,"/rest/v1/pkms_directories?on_conflict=workspace_id,path",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify({workspace_id:workspace.id,path:"",tree_sha:metadata.tree,loaded:false})});
       if(state.files.length){
+        stage = "file_import";
         await supabaseRequest(env,"/rest/v1/pkms_files?on_conflict=workspace_id,file_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(state.files.map(file=>({workspace_id:workspace.id,file_id:file.file_id,path:file.path,parent_path:file.path.includes("/")?file.path.slice(0,file.path.lastIndexOf("/")):"",kind:file.kind,content:file.content,object_key:file.object_key,size:file.size,sha:file.sha,previous_path:file.previous_path,revision:file.revision,deleted:Boolean(file.deleted),dirty:Boolean(file.dirty)})))});
       }
       if(state.documents.length){
+        stage = "document_import";
         await supabaseRequest(env,"/rest/v1/pkms_documents?on_conflict=workspace_id,file_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(state.documents.map(doc=>({workspace_id:workspace.id,file_id:doc.file_id,state_update_b64:doc.state_update,compacted_revision:0})))});
       }
       migratedWorkspaces++;migratedFiles+=state.files.length;migratedDocuments+=state.documents.length;
     }
     return json({ok:true,migratedWorkspaces,migratedFiles,migratedDocuments,migratedAccountValues:accountRows.length});
-  } catch {
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code).slice(0,80) : undefined;
+    const reason = isDurableObjectsReadLimit(error) ? "durable_objects_read_limit" : code ?? "migration_step_failed";
+    console.error(JSON.stringify({event:"legacy_migration.failed",stage,reason,errorType:error instanceof Error?error.name:"unknown"}));
     return json({error:"legacy_migration_failed",message:"Legacy storage migration failed. Source data was kept intact; retry after reviewing migration status."},{status:502});
   }
 }
