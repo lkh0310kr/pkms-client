@@ -1,5 +1,6 @@
 import type { Env, Session } from "./env";
 import { cookie, json, randomToken, signSession, verifySession } from "./crypto";
+import { accountStore } from "./SupabaseAccountStore";
 
 const encoder = new TextEncoder();
 const STORE = "pkms-mcp-oauth";
@@ -19,8 +20,8 @@ type Dependencies = {
   saveGitHubGrant: (env: Env, grant: { access_token?: string; refresh_token?: string; expires_in?: number }, requestId: string) => Promise<Session>;
 };
 
-function store(env: Env): DurableObjectStub {
-  return env.ACCOUNTS.get(env.ACCOUNTS.idFromName(STORE));
+function store(env: Env): { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> } {
+  return accountStore(env, STORE);
 }
 
 async function put<T>(env: Env, key: string, value: T, expiresAt: number): Promise<void> {

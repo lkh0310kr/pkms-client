@@ -7,6 +7,11 @@ export interface Env {
   SESSION_SECRET: string;
   DATA_ENCRYPTION_KEY: string;
   PUBLIC_ORIGIN: string;
+  SUPABASE_URL: string;
+  SUPABASE_SERVICE_ROLE_KEY: string;
+  SUPABASE_ANON_KEY: string;
+  PKMS_REALTIME_PRIVATE_KEY: string;
+  PKMS_REALTIME_KEY_ID: string;
 }
 
 export interface Session {

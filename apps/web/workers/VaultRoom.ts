@@ -3,6 +3,7 @@ import * as Y from "yjs";
 import type { Env, WorkspaceRecord } from "./env";
 import { json } from "./crypto";
 import { durableObjectsReadLimitResponse, isDurableObjectsReadLimit } from "./serviceLimits";
+import { accountStore } from "./SupabaseAccountStore";
 
 const FLUSH_AFTER_MS = 15 * 60 * 1000;
 const MAX_GIT_FILE_BYTES = 50 * 1024 * 1024;
@@ -118,7 +119,7 @@ export class VaultRoom extends DurableObject<Env> {
   private async token(): Promise<string> {
     const login = this.getMeta("accountLogin");
     if (!login) throw new Error("GitHub credentials are missing; reconnect this workspace.");
-    const account = this.env.ACCOUNTS.get(this.env.ACCOUNTS.idFromName(login.toLowerCase()));
+    const account = accountStore(this.env, login);
     const response = await account.fetch("https://account/credentials/access-token");
     if (!response.ok) throw new Error((await response.json() as { message?: string }).message ?? "GitHub authorization expired; sign in again.");
     return (await response.json() as { accessToken: string }).accessToken;

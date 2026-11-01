@@ -1,6 +1,7 @@
 import { createRequestHandler } from "react-router";
 import type { Env, Session, WorkspaceRecord } from "./env";
 import { AccountStore } from "./AccountStore";
+import { accountStore } from "./SupabaseAccountStore";
 import { VaultRoom } from "./VaultRoom";
 import { cookie, decryptSecret, encryptSecret, json, randomToken, sessionCookie, signSession, verifySession, verifySessionDetailed } from "./crypto";
 import { handleMcpGithubCallback, handleMcpRequest, isMcpTokenActive } from "./mcp";
@@ -66,8 +67,8 @@ async function saveGitHubGrant(env: Env, grant: GitHubGrant, requestId: string):
   return { login: user.login, avatarUrl: user.avatar_url, expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 };
 }
 
-function account(env: Env, login: string): DurableObjectStub {
-  return env.ACCOUNTS.get(env.ACCOUNTS.idFromName(login.toLowerCase()));
+function account(env: Env, login: string): { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> } {
+  return accountStore(env, login);
 }
 
 async function credentials(env: Env, login: string): Promise<Credentials> {
