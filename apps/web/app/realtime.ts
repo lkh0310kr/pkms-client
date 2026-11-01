@@ -71,8 +71,12 @@ export class PKMSRealtimeSocket {
           const message = typeof payload.message === "string" ? payload.message : "";
           const code = /client.*presence.*rate.*limit/i.test(message) ? "ClientPresenceRateLimitReached"
             : /rate.*limit/i.test(message) ? "rate_limit"
+            : /row.level security|rls/i.test(message) ? "row_security"
+            : /permission denied.*(table|schema)/i.test(message) ? "database_privilege"
+            : /not authorized|unauthorized/i.test(message) ? "unauthorized"
+            : /policy/i.test(message) ? "policy_check"
+            : /permission/i.test(message) ? "permission_denied"
             : /jwt|token|auth/i.test(message) ? "authorization"
-            : /policy|permission/i.test(message) ? "channel_policy"
             : /timeout|timed out/i.test(message) ? "timeout"
             : "unclassified";
           void this.reportStatus("SYSTEM_ERROR", { name: "RealtimeSystemError", code });
