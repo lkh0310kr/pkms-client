@@ -217,7 +217,10 @@ async function invokeTool(
       method: "POST", headers: { Authorization: request.headers.get("Authorization") ?? "", "Content-Type": "application/json" },
       body: JSON.stringify({ operationId: crypto.randomUUID(), fileId: file.id, update }),
     }), env, requestId, dependencies);
-    if (!response.ok) return toolError("Could not save the Markdown file through PKMS.");
+    if (!response.ok) {
+      console.error("mcp_write_file_failed", { requestId, status: response.status });
+      return toolError(`Could not save the Markdown file through PKMS (HTTP ${response.status}, request ${requestId}).`);
+    }
     return toolResult({ path, ...(await response.json() as Record<string, unknown>) });
   }
   if (name === "sync_status") {
