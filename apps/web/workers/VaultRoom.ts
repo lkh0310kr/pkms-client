@@ -575,7 +575,8 @@ export class VaultRoom extends DurableObject<Env> {
       socket?.send(JSON.stringify(message));
       this.broadcast({ type: "document-update", fileId: targetFileId, revision, update: data.update, operationId }, socket);
       return json(message);
-    } catch {
+    } catch (error) {
+      console.error(JSON.stringify({ event: "document_update_apply_failed", errorType: error instanceof Error ? error.name : "unknown", errorMessage: error instanceof Error ? error.message : "unknown" }));
       const message = { type: "error", code: "invalid_document_update", message: "CRDT update could not be applied", operationId };
       socket?.send(JSON.stringify(message));
       return json(message, { status: 400 });
