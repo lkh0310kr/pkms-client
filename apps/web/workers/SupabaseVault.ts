@@ -252,6 +252,7 @@ async function recoverCompletedFlush(env:Env,token:string,owner:string,repo:stri
   const latest=await(await github(token,`/repos/${owner}/${repo}/git/ref/heads/${w.branch.split("/").map(encodeURIComponent).join("/")}`)).json() as {object:{sha:string}};
   if(latest.object.sha!==remoteHead)return false;
   await supabaseRpc(env,"pkms_finish_flush",{p_workspace_id:id,p_lease_token:leaseToken,p_captured_revision:Number(w.server_revision),p_new_head:remoteHead,p_files:completed});
+  for(const file of changed)if(file.object_key)await env.ASSET_BUCKET.delete(file.object_key);
   return true;
 }
 async function gitBlobSha(bytes:Uint8Array):Promise<string>{
