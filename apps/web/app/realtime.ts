@@ -68,10 +68,17 @@ export class PKMSRealtimeSocket {
       this.client = sharedClient(config.url, config.anonKey);
       await this.client.realtime.setAuth(initial.token);
       const channel = this.client.channel(`pkms:${this.workspaceId}`, {
-        config: { private: true, broadcast: { self: false } },
+        config: { private: true, presence: { key: this.clientId }, broadcast: { self: false } },
       });
       this.channel = channel;
       channel.on("broadcast", { event: "protocol" }, ({ payload }) => this.dispatch(payload as RealtimeEnvelope));
+      const dispatchPeers = () => {
+        const peers = Object.values(channel.presenceState()).flat().map((presence) => presence as unknown as Record<string, unknown>);
+        this.dispatch({ type: "presence-state", peers } as RealtimeEnvelope);
+      };
+      channel.on("presence", { event: "sync" }, dispatchPeers);
+      channel.on("presence", { event: "join" }, dispatchPeers);
+      channel.on("presence", { event: "leave" }, dispatchPeers);
       channel.on("system", {}, (payload: { status?: unknown; message?: unknown }) => {
         if (payload.status === "error") {
           const message = typeof payload.message === "string" ? payload.message : "";
@@ -126,6 +133,7 @@ export class PKMSRealtimeSocket {
     let envelope: RealtimeEnvelope;
     try { envelope = JSON.parse(raw) as RealtimeEnvelope; } catch { return; }
     if (envelope.type === "hello" || envelope.type === "presence") {
+      void channel.track({ clientId: this.clientId, login: this.user.login, avatarUrl: this.user.avatarUrl, fileId: envelope.fileId });
       return;
     }
     if (envelope.type !== "document-update" || !envelope.fileId || !envelope.operationId || !envelope.update) return;
