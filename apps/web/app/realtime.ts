@@ -102,7 +102,7 @@ export class PKMSRealtimeSocket {
       channel.on("presence", { event: "sync" }, dispatchPeers);
       channel.on("presence", { event: "join" }, dispatchPeers);
       channel.on("presence", { event: "leave" }, dispatchPeers);
-      channel.on("system", {}, (payload: { status?: unknown; message?: unknown }) => {
+      channel.on("system", {}, (payload: { extension?: unknown; status?: unknown; message?: unknown }) => {
         if (payload.status === "error") {
           const message = typeof payload.message === "string" ? payload.message : "";
           const code = /client.*presence.*rate.*limit/i.test(message) ? "ClientPresenceRateLimitReached"
@@ -117,7 +117,7 @@ export class PKMSRealtimeSocket {
             : /jwt|token|auth/i.test(message) ? "authorization"
             : /timeout|timed out/i.test(message) ? "timeout"
             : "unclassified";
-          void this.reportStatus("SYSTEM_ERROR", { name: "RealtimeSystemError", code });
+          void this.reportStatus("SYSTEM_ERROR", { name: "RealtimeSystemError", code }, undefined, undefined, payload.extension);
         }
       });
       channel.subscribe((status, error) => {
@@ -144,9 +144,9 @@ export class PKMSRealtimeSocket {
     }
   }
 
-  private reportStatus(status: RealtimeStatus, error?: unknown, closeCode?: number, wasClean?: boolean): Promise<void> {
+  private reportStatus(status: RealtimeStatus, error?: unknown, closeCode?: number, wasClean?: boolean, extension?: unknown): Promise<void> {
     return this.api<void>(`/api/workspaces/${encodeURIComponent(this.workspaceId)}/diagnostics/realtime`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, ...errorMetadata(error), closeCode, wasClean, connectionState: this.client?.realtime.connectionState(), transportClass: this.client?.realtime.transport.name, clientId: this.clientId }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, ...errorMetadata(error), closeCode, wasClean, extension: typeof extension === "string" && ["system", "presence", "broadcast", "postgres_changes"].includes(extension) ? extension : undefined, connectionState: this.client?.realtime.connectionState(), transportClass: this.client?.realtime.transport.name, clientId: this.clientId }),
     }).then(() => {}).catch(() => {});
   }
 
