@@ -3,6 +3,7 @@ import type { Env, Session, WorkspaceRecord } from "./env";
 import { AccountStore } from "./AccountStore";
 import { VaultRoom } from "./VaultRoom";
 import { cookie, decryptSecret, encryptSecret, json, randomToken, sessionCookie, signSession, verifySession, verifySessionDetailed } from "./crypto";
+import { handleMcpGithubCallback, handleMcpRequest, isMcpTokenActive } from "./mcp";
 
 export { AccountStore, VaultRoom };
 
@@ -84,6 +85,10 @@ async function requireSession(request: Request, env: Env, requestId: string): Pr
   if (session.login.toLowerCase() !== ALLOWED_GITHUB_LOGIN) {
     trace(requestId, "auth.session.rejected", { path: new URL(request.url).pathname, reason: "account_not_allowed", login: session.login });
     return json({ error: "account_not_allowed", requestId }, { status: 403 });
+  }
+  if (session.tokenType === "mcp" && (session.audience !== `${env.PUBLIC_ORIGIN}/mcp` || !await isMcpTokenActive(env, session))) {
+    trace(requestId, "auth.session.rejected", { path: new URL(request.url).pathname, reason: "mcp_token_invalid", login: session.login });
+    return json({ error: "invalid_token", requestId }, { status: 401 });
   }
   return session;
 }
@@ -243,6 +248,10 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
 
   const auth = await requireSession(request, env, requestId);
   if (auth instanceof Response) return auth;
+  if (auth.tokenType === "mcp") {
+    const scope = request.method === "GET" || request.method === "HEAD" ? "pkms:read" : "pkms:write";
+    if (!auth.scopes?.includes(scope)) return json({ error: "insufficient_scope", requiredScope: scope, requestId }, { status: 403, headers: { "WWW-Authenticate": `Bearer error="insufficient_scope", scope="${scope}"` } });
+  }
   if (!sameOrigin(request, env)) return json({ error: "origin_mismatch" }, { status: 403 });
   const authCredentials = await credentials(env, auth.login);
 
@@ -320,20 +329,25 @@ export default {
     const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
     const startedAt = Date.now();
     let response: Response;
-    if (url.pathname.startsWith("/api/")) {
-      try { response = await api(request, env, requestId); }
-      catch (error) {
-        trace(requestId, "request.failed", { method: request.method, path: url.pathname, errorType: error instanceof Error ? error.name : "UnknownError" });
-        response = url.pathname === "/api/auth/github/callback"
-          ? authFailure(requestId, "oauth_callback_internal_error", 500)
-          : json({ error: "server_error", requestId }, { status: 500 });
+    try {
+      const mcpResponse = await handleMcpRequest(request, env, requestId, {
+        dispatchApi: (input, bindings, id) => api(input, bindings, id),
+        saveGitHubGrant,
+      });
+      if (mcpResponse) response = mcpResponse;
+      else {
+        const mcpCallback = await handleMcpGithubCallback(request, env, requestId, saveGitHubGrant);
+        if (mcpCallback) response = mcpCallback;
+        else if (url.pathname.startsWith("/api/")) response = await api(request, env, requestId);
+        else response = await requestHandler(request);
       }
-    } else {
-      try { response = await requestHandler(request); }
-      catch (error) {
-        trace(requestId, "request.failed", { method: request.method, path: url.pathname, errorType: error instanceof Error ? error.name : "UnknownError" });
-        response = new Response("Internal Server Error", { status: 500 });
-      }
+    } catch (error) {
+      trace(requestId, "request.failed", { method: request.method, path: url.pathname, errorType: error instanceof Error ? error.name : "UnknownError" });
+      response = url.pathname === "/api/auth/github/callback"
+        ? authFailure(requestId, "oauth_callback_internal_error", 500)
+        : url.pathname === "/mcp" || url.pathname.startsWith("/oauth/")
+          ? json({ error: "mcp_request_failed", requestId }, { status: 500 })
+          : new Response("Internal Server Error", { status: 500 });
     }
     trace(requestId, "request.completed", { method: request.method, path: url.pathname, status: response.status, durationMs: Date.now() - startedAt });
     if (response.status === 101) return response;

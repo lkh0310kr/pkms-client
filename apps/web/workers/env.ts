@@ -13,6 +13,10 @@ export interface Session {
   login: string;
   avatarUrl?: string;
   expiresAt: number;
+  scopes?: string[];
+  tokenType?: "mcp";
+  audience?: string;
+  tokenId?: string;
 }
 
 export interface WorkspaceRecord {

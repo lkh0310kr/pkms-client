@@ -84,6 +84,30 @@ export class AccountStore extends DurableObject<Env> {
       this.set("workspaces", JSON.stringify(list));
       return json({ workspace });
     }
+    if (request.method === "POST" && url.pathname.startsWith("/mcp-oauth/put/")) {
+      const key = url.pathname.slice("/mcp-oauth/put/".length);
+      if (!key || key.includes("/")) return json({ error: "invalid_key" }, { status: 400 });
+      if (key.startsWith("client:") && (this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM account WHERE key LIKE 'mcp:client:%'").toArray()[0]?.count ?? 0) >= 20) return json({ error: "client_limit_reached" }, { status: 429 });
+      const body = await request.json() as { value?: unknown; expiresAt?: number };
+      if (typeof body.expiresAt !== "number" || body.expiresAt <= Date.now()) return json({ error: "invalid_expiry" }, { status: 400 });
+      this.set(`mcp:${key}`, JSON.stringify({ value: body.value, expiresAt: body.expiresAt }));
+      return json({ ok: true });
+    }
+    if ((request.method === "GET" || request.method === "POST" || request.method === "DELETE") && (url.pathname.startsWith("/mcp-oauth/get/") || url.pathname.startsWith("/mcp-oauth/consume/") || url.pathname.startsWith("/mcp-oauth/delete/"))) {
+      const consume = url.pathname.startsWith("/mcp-oauth/consume/");
+      const key = url.pathname.replace(/^\/mcp-oauth\/(?:get|consume|delete)\//, "");
+      if (!key || key.includes("/")) return json({ error: "invalid_key" }, { status: 400 });
+      const stored = this.get(`mcp:${key}`);
+      if (consume || request.method === "DELETE") this.ctx.storage.sql.exec("DELETE FROM account WHERE key = ?", `mcp:${key}`);
+      if (!stored) return json({ error: "not_found" }, { status: 404 });
+      try {
+        const record = JSON.parse(stored) as { value: unknown; expiresAt: number };
+        if (record.expiresAt <= Date.now()) return json({ error: "expired" }, { status: 404 });
+        return json({ value: record.value, expiresAt: record.expiresAt });
+      } catch {
+        return json({ error: "invalid_record" }, { status: 500 });
+      }
+    }
     return json({ error: "not_found" }, { status: 404 });
   }
 }

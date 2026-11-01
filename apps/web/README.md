@@ -38,6 +38,20 @@ Deploy with `npm run deploy` after authenticating Wrangler using `npx wrangler l
 - GitHub REST Git Data API commits are batched, retried, and guarded against unexpected branch head changes.
 - Binary uploads have a 50 MiB PKMS limit to keep GitHub blob requests within practical Worker payload limits.
 
+## MCP for AI agents
+
+The Worker exposes a Streamable HTTP MCP endpoint at `/mcp`. Add it to Codex and complete the browser authorization flow:
+
+```sh
+codex mcp add pkms --url https://pkms-cloud.lkh0310kr.workers.dev/mcp
+codex mcp login pkms
+codex mcp list
+```
+
+The OAuth authorization code flow requires PKCE S256 and explicitly shows the requested read/write scopes before redirecting to GitHub. Only the allowed GitHub account can authorize. MCP access tokens are PKMS-scoped signed sessions; GitHub access tokens remain encrypted in the Account Durable Object and are never returned by MCP. The Worker enforces the token scopes on all API routes.
+
+Available tools list workspaces and directory entries, read one Markdown file on request, write one Markdown file through the existing Yjs collaboration API, and inspect GitHub backup status. Directory listing returns metadata only; file contents are returned only by `read_file`. MCP errors and invocation logs do not include document bodies, OAuth codes, tokens, or query strings. The consent page warns that content explicitly read by an AI agent may be sent to that agent's model provider.
+
 ## Configuration
 
 | Name | Required | Purpose |
