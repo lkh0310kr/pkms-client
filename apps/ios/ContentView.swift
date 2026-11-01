@@ -10,17 +10,36 @@ private struct FileTreeRow: Identifiable {
 
 struct ContentView: View {
     @Environment(PKMSModel.self) private var model
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var showingRepositories = false
     @State private var showingSettings = false
     @State private var showingFileImporter = false
+    @State private var compactPath: [String] = []
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
-            detailPane
+        Group {
+            if horizontalSizeClass == .compact {
+                NavigationStack(path: $compactPath) {
+                    compactRoot
+                        .navigationDestination(for: String.self) { fileID in
+                            if model.activeFile?.id == fileID, model.activeFile?.isMarkdown == true {
+                                markdownEditor
+                            } else if let file = model.files.first(where: { $0.id == fileID }) {
+                                ContentUnavailableView(entryName(file.path), systemImage: "paperclip", description: Text("This file is ready to preview."))
+                            } else {
+                                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
+                        }
+                }
+            } else {
+                NavigationSplitView {
+                    sidebar
+                } detail: {
+                    detailPane
+                }
+                .navigationSplitViewStyle(.balanced)
+            }
         }
-        .navigationSplitViewStyle(.balanced)
         .tint(Color.accentColor)
         .alert("PKMS", isPresented: errorPresented) {
             Button("OK") { model.dismissError() }
@@ -35,6 +54,105 @@ struct ContentView: View {
         .sheet(isPresented: previewPresented, onDismiss: { model.dismissPreview() }) {
             if let url = model.previewURL { QuickLookSheet(url: url) }
         }
+    }
+
+    @ViewBuilder private var compactRoot: some View {
+        if model.isRestoringSession {
+            ProgressView("Connecting…").frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.user == nil {
+            signIn
+        } else if model.activeWorkspace == nil {
+            emptyWorkspace
+        } else {
+            compactBrowser
+        }
+    }
+
+    private var compactBrowser: some View {
+        List {
+            Section("Workspaces") {
+                ForEach(model.workspaces) { workspace in
+                    Button {
+                        compactPath.removeAll()
+                        Task { await model.selectWorkspace(workspace) }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "externaldrive").foregroundStyle(.secondary)
+                            Text(workspace.repository).lineLimit(1)
+                            Spacer()
+                            if model.activeWorkspace?.id == workspace.id {
+                                Image(systemName: "checkmark").font(.caption.weight(.semibold)).foregroundStyle(.tint)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Section(model.activeWorkspace?.repository ?? "Files") {
+                if treeRows.isEmpty && model.isLoading {
+                    ProgressView("Loading files…").frame(maxWidth: .infinity, alignment: .leading)
+                        .listRowBackground(Color.clear)
+                } else if treeRows.isEmpty {
+                    ContentUnavailableView {
+                        Label("No files yet", systemImage: "doc.text")
+                    } description: {
+                        Text("Create a note to get started.")
+                    } actions: {
+                        Button("New note", systemImage: "square.and.pencil") { Task { await model.createNote() } }
+                    }
+                    .listRowBackground(Color.clear)
+                } else {
+                    ForEach(treeRows) { row in
+                        compactFileRow(row)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle(model.activeWorkspace?.repository ?? "Workspace")
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Menu {
+                    Button("New note", systemImage: "square.and.pencil") { Task { await model.createNote() } }
+                    Button("New folder", systemImage: "folder.badge.plus") { Task { await model.createFolder() } }
+                    Button("Upload file", systemImage: "arrow.up.doc") { showingFileImporter = true }
+                    Button("Connect repository", systemImage: "plus") { openRepositories() }
+                } label: { Image(systemName: "plus").accessibilityLabel("Create or connect") }
+                Button { showingSettings = true } label: { Image(systemName: "gearshape").accessibilityLabel("Settings") }
+            }
+        }
+    }
+
+    private func compactFileRow(_ row: FileTreeRow) -> some View {
+        let file = row.file
+        return Button {
+            if file.kind == "folder" {
+                Task { await model.toggleFolder(file) }
+            } else {
+                Task {
+                    await model.open(file)
+                    if file.isMarkdown { compactPath.append(file.id) }
+                }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Color.clear.frame(width: CGFloat(row.depth) * 16, height: 1)
+                if file.kind == "folder" {
+                    Image(systemName: model.expandedFolders.contains(file.path) ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.semibold)).frame(width: 10)
+                    Image(systemName: model.expandedFolders.contains(file.path) ? "folder.fill" : "folder")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Image(systemName: file.isMarkdown ? "doc.text" : "paperclip")
+                        .frame(width: 20).foregroundStyle(file.isMarkdown ? Color.accentColor : Color.secondary)
+                }
+                Text(entryName(file.path)).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var errorPresented: Binding<Bool> {
@@ -77,7 +195,11 @@ struct ContentView: View {
                         Text("Connect a repository to get started")
                             .font(.subheadline).foregroundStyle(.secondary)
                     } else if treeRows.isEmpty {
-                        if model.errorMessage == nil { ProgressView().frame(maxWidth: .infinity, alignment: .leading) }
+                        if model.isLoading {
+                            ProgressView().frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            Text("No files yet").font(.subheadline).foregroundStyle(.secondary)
+                        }
                     } else {
                         ForEach(treeRows) { row in fileRow(row) }
                     }

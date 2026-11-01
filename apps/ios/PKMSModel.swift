@@ -258,6 +258,9 @@ final class PKMSModel {
                 activeWorkspace = match
             } else if let first = workspaces.first {
                 await selectWorkspace(first)
+            } else {
+                activeWorkspace = nil
+                files = []
             }
         } catch { errorMessage = error.localizedDescription }
     }
@@ -277,6 +280,8 @@ final class PKMSModel {
     }
 
     func selectWorkspace(_ workspace: PKMSWorkspace) async {
+        isLoading = true
+        defer { isLoading = false }
         socket?.cancel(with: .goingAway, reason: nil)
         socketTask?.cancel()
         activeWorkspace = workspace
