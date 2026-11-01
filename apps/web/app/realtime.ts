@@ -51,6 +51,14 @@ export class PKMSRealtimeSocket {
       const config = await this.api<{ url: string; anonKey: string }>("/api/realtime/config");
       const initial = await this.api<{ token: string }>("/api/realtime/token");
       if (this.closed) return;
+      const tokenParts = initial.token.split(".");
+      const encodedClaims = tokenParts[1]?.replaceAll("-", "+").replaceAll("_", "/");
+      const claims = encodedClaims ? JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(encodedClaims.padEnd(Math.ceil(encodedClaims.length / 4) * 4, "=")), (char) => char.charCodeAt(0)))) as Record<string, unknown> : {};
+      const appMetadata = claims.app_metadata && typeof claims.app_metadata === "object" ? claims.app_metadata as Record<string, unknown> : {};
+      void this.api<void>(`/api/workspaces/${encodeURIComponent(this.workspaceId)}/diagnostics/realtime`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "TOKEN_CHECK", clientId: this.clientId, tokenRole: claims.role, issuerMatches: claims.iss === window.location.origin, loginMatches: appMetadata.github_login === this.user.login.toLowerCase(), subjectPresent: typeof claims.sub === "string" && claims.sub.length > 0 }),
+      }).catch(() => {});
       reportSocketEvent = (status, closeCode, wasClean) => { void this.reportStatus(status, undefined, closeCode, wasClean); };
       this.client = sharedClient(config.url, config.anonKey);
       this.client.realtime.setAuth(initial.token);
