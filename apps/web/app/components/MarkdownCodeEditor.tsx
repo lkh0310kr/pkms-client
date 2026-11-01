@@ -2,31 +2,14 @@ import { useEffect, useRef } from "react";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, indentOnInput, syntaxHighlighting, syntaxTree } from "@codemirror/language";
-import { EditorState, RangeSetBuilder, StateEffect, StateField, type Extension } from "@codemirror/state";
+import { EditorState, RangeSetBuilder } from "@codemirror/state";
 import { Decoration, EditorView, keymap, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-
-const setHoveredLine = StateEffect.define<number | null>();
-const hoveredLine = StateField.define<number | null>({
-  create: () => null,
-  update(value, transaction) {
-    if (transaction.docChanged) return null;
-    for (const effect of transaction.effects) if (effect.is(setHoveredLine)) return effect.value;
-    return value;
-  },
-});
 
 const hide = Decoration.replace({});
 const headingTypes = new Set(["ATXHeading1", "ATXHeading2", "ATXHeading3", "ATXHeading4", "ATXHeading5", "ATXHeading6"]);
 
 function selectionTouches(state: EditorState, from: number, to: number): boolean {
   return state.selection.ranges.some((range) => range.from <= to && range.to >= from);
-}
-
-function revealForPointerOrCaret(view: EditorView, from: number, to: number): boolean {
-  if (selectionTouches(view.state, from, to)) return true;
-  const hovered = view.state.field(hoveredLine);
-  if (hovered === null) return false;
-  return hovered >= view.state.doc.lineAt(from).number && hovered <= view.state.doc.lineAt(to).number;
 }
 
 function collectInline(view: EditorView): DecorationSet {
@@ -37,7 +20,7 @@ function collectInline(view: EditorView): DecorationSet {
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(view.state).iterate({ from, to, enter(node) {
       const name = node.type.name;
-      const raw = revealForPointerOrCaret(view, node.from, node.to);
+      const raw = selectionTouches(view.state, node.from, node.to);
       if (headingTypes.has(name)) {
         const mark = node.node.getChild("HeaderMark");
         if (!mark) return;
@@ -75,14 +58,19 @@ function collectInline(view: EditorView): DecorationSet {
       }
       if (name === "Blockquote") {
         add(node.from, node.to, Decoration.mark({ class: "cm-live-quote-text" }));
-        const mark = node.node.getChild("QuoteMark");
-        if (mark && !raw) add(mark.from, mark.to, hide);
+        for (const mark of node.node.getChildren("QuoteMark")) {
+          const line = view.state.doc.lineAt(mark.from);
+          if (!selectionTouches(view.state, line.from, line.to)) add(mark.from, mark.to, hide);
+        }
         return;
       }
       if (name === "ListItem") {
         if (node.node.getChild("Task")) return;
         const mark = node.node.getChild("ListMark");
-        if (mark && !raw) add(mark.from, mark.to, Decoration.replace({ widget: new ListMarker(view.state.doc.sliceString(mark.from, mark.to)) }));
+        if (mark) {
+          const line = view.state.doc.lineAt(mark.from);
+          if (!selectionTouches(view.state, line.from, mark.to)) add(mark.from, mark.to, Decoration.replace({ widget: new ListMarker(view.state.doc.sliceString(mark.from, mark.to)) }));
+        }
         return;
       }
       if (name === "FencedCode" && !raw) {
@@ -117,9 +105,7 @@ const inlineLivePreview = ViewPlugin.fromClass(class {
   decorations: DecorationSet;
   constructor(readonly view: EditorView) { this.decorations = collectInline(view); }
   update(update: ViewUpdate) {
-    if (update.docChanged || update.selectionSet || update.viewportChanged || update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(setHoveredLine)))) {
-      this.decorations = collectInline(update.view);
-    }
+    if (update.docChanged || update.selectionSet || update.viewportChanged) this.decorations = collectInline(update.view);
   }
 }, { decorations: (plugin) => plugin.decorations });
 
@@ -127,7 +113,7 @@ const blockLivePreview = ViewPlugin.fromClass(class {
   decorations: DecorationSet;
   constructor(readonly view: EditorView) { this.decorations = this.build(); }
   update(update: ViewUpdate) {
-    if (update.docChanged || update.selectionSet || update.viewportChanged || update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(setHoveredLine)))) this.decorations = this.build();
+    if (update.docChanged || update.selectionSet || update.viewportChanged) this.decorations = this.build();
   }
   build() {
     const builder = new RangeSetBuilder<Decoration>();
@@ -149,19 +135,6 @@ const blockLivePreview = ViewPlugin.fromClass(class {
   }
 }, { decorations: (plugin) => plugin.decorations });
 
-const pointerTracking: Extension = EditorView.domEventHandlers({
-  mousemove(event, view) {
-    const position = view.posAtCoords({ x: event.clientX, y: event.clientY });
-    const line = position === null ? null : view.state.doc.lineAt(position).number;
-    if (view.state.field(hoveredLine) !== line) view.dispatch({ effects: setHoveredLine.of(line) });
-    return false;
-  },
-  mouseleave(_event, view) {
-    if (view.state.field(hoveredLine) !== null) view.dispatch({ effects: setHoveredLine.of(null) });
-    return false;
-  },
-});
-
 export function MarkdownCodeEditor({ value, onChange, onNavigateReady }: { value: string; onChange: (value: string) => void; onNavigateReady?: (navigate: ((line: number) => void) | null) => void }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
@@ -174,7 +147,7 @@ export function MarkdownCodeEditor({ value, onChange, onNavigateReady }: { value
       doc: value,
       extensions: [
         markdown(), history(), indentOnInput(), syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-        hoveredLine, inlineLivePreview, blockLivePreview, pointerTracking,
+        inlineLivePreview, blockLivePreview,
         keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]), EditorView.lineWrapping,
         EditorView.contentAttributes.of({ "aria-label": "Markdown editor", autocapitalize: "sentences", spellcheck: "true" }),
         EditorView.updateListener.of((update) => { if (update.docChanged) onChangeRef.current(update.state.doc.toString()); }),

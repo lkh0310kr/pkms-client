@@ -157,6 +157,8 @@ export default function Home() {
     setShowFileFilters(false);
   }, [activeWorkspace?.id]);
 
+  useEffect(() => { setOutlineOpen(false); }, [activeFile?.id]);
+
   const clearActiveFile = () => {
     const current = activeRef.current;
     if (current.file && current.text) {
