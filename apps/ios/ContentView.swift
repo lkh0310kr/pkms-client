@@ -147,7 +147,7 @@ struct ContentView: View {
                     Task { await model.toggleFolder(file) }
                 } label: {
                     Image(systemName: model.expandedFolders.contains(file.path) ? "chevron.down" : "chevron.right")
-                        .font(.caption2.weight(.semibold)).frame(width: 30, height: 42)
+                        .font(.caption2.weight(.semibold)).frame(width: 28, height: 36)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -163,7 +163,7 @@ struct ContentView: View {
                         Text(entryName(file.path)).lineLimit(1)
                         Spacer(minLength: 0)
                     }
-                    .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+                    .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -180,7 +180,7 @@ struct ContentView: View {
                         Text(entryName(file.path)).lineLimit(1)
                         Spacer(minLength: 0)
                     }
-                    .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+                    .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
