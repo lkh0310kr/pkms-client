@@ -1,6 +1,7 @@
 import SwiftUI
 import QuickLook
 import UniformTypeIdentifiers
+import UIKit
 
 private struct FileTreeRow: Identifiable {
     let file: PKMSFile
@@ -15,6 +16,7 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var showingFileImporter = false
     @State private var compactPath: [String] = []
+    @State private var copiedDeviceCode: String?
 
     var body: some View {
         Group {
@@ -53,6 +55,11 @@ struct ContentView: View {
         .sheet(isPresented: $showingSettings) { settingsForm }
         .sheet(isPresented: previewPresented, onDismiss: { model.dismissPreview() }) {
             if let url = model.previewURL { QuickLookSheet(url: url) }
+        }
+        .onChange(of: model.deviceCode) { _, code in
+            guard let code else { return }
+            UIPasteboard.general.string = code
+            copiedDeviceCode = code
         }
     }
 
@@ -434,6 +441,14 @@ struct ContentView: View {
                     Text(code).font(.system(size: 30, weight: .semibold, design: .monospaced))
                         .tracking(3).textSelection(.enabled).padding(.vertical, 12)
                         .frame(maxWidth: 300).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+                    Button {
+                        UIPasteboard.general.string = code
+                        copiedDeviceCode = code
+                    } label: {
+                        Label(copiedDeviceCode == code ? "Code copied" : "Copy code",
+                              systemImage: copiedDeviceCode == code ? "checkmark" : "doc.on.doc")
+                    }
+                    .buttonStyle(.bordered)
                     if let url = model.verificationURL { Link("Open GitHub", destination: url).buttonStyle(.borderedProminent) }
                     ProgressView("Waiting for authorization")
                         .font(.footnote).tint(.secondary)
