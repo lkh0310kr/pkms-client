@@ -3,11 +3,12 @@ import { createClient, type RealtimeChannel, type SupabaseClient } from "@supaba
 export interface RealtimeUser { login: string; avatarUrl?: string }
 export interface RealtimeEnvelope { type: string; fileId?: string; update?: string; operationId?: string; acceptedRevision?: number; conflictCopyPath?: string; revision?: number; message?: string; code?: string; [key: string]: unknown }
 type Api = <T>(path: string, init?: RequestInit) => Promise<T>;
-type RealtimeStatus = "SUBSCRIBED" | "CHANNEL_ERROR" | "TIMED_OUT" | "CLOSED" | "CONNECT_ERROR" | "SYSTEM_ERROR" | "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR" | "SOCKET_FRAME";
+type RealtimeStatus = "SUBSCRIBED" | "CHANNEL_ERROR" | "TIMED_OUT" | "CLOSED" | "CONNECT_ERROR" | "SYSTEM_ERROR" | "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR" | "SOCKET_FRAME" | "TOKEN_SOURCE";
 const clients = new Map<string, SupabaseClient>();
 const realtimeTokens = new Map<string, string>();
 let reportSocketEvent: ((status: "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR", closeCode?: number, wasClean?: boolean) => void) | undefined;
 let reportSocketFrame: ((frameEvent: string, frameStatus?: string, frameErrorCode?: string) => void) | undefined;
+let reportTokenSource: ((tokenPresent: boolean) => void) | undefined;
 class DiagnosticWebSocket extends WebSocket {
   constructor(url: string | URL, protocols?: string | string[]) {
     super(url, protocols);
@@ -40,7 +41,11 @@ function sharedClient(url: string, anonKey: string): SupabaseClient {
     client = createClient(url, anonKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
       realtime: { transport: DiagnosticWebSocket, logLevel: "warn" },
-      accessToken: async () => realtimeTokens.get(key) ?? null,
+      accessToken: async () => {
+        const token = realtimeTokens.get(key) ?? null;
+        reportTokenSource?.(token !== null);
+        return token;
+      },
     });
     clients.set(key, client);
   }
@@ -81,6 +86,12 @@ export class PKMSRealtimeSocket {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "TOKEN_CHECK", clientId: this.clientId, tokenRole: claims.role, issuerMatches: claims.iss === window.location.origin, loginMatches: appMetadata.github_login === this.user.login.toLowerCase(), subjectPresent: typeof claims.sub === "string" && claims.sub.length > 0 }),
       }).catch(() => {});
+      reportTokenSource = (tokenPresent) => {
+        void this.api<void>(`/api/workspaces/${encodeURIComponent(this.workspaceId)}/diagnostics/realtime`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "TOKEN_SOURCE", clientId: this.clientId, tokenPresent }),
+        }).catch(() => {});
+      };
       reportSocketEvent = (status, closeCode, wasClean) => { void this.reportStatus(status, undefined, closeCode, wasClean); };
       reportSocketFrame = (frameEvent, frameStatus, frameErrorCode) => {
         void this.api<void>(`/api/workspaces/${encodeURIComponent(this.workspaceId)}/diagnostics/realtime`, {
