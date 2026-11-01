@@ -3,7 +3,7 @@ import { createClient, type RealtimeChannel, type SupabaseClient } from "@supaba
 export interface RealtimeUser { login: string; avatarUrl?: string }
 export interface RealtimeEnvelope { type: string; fileId?: string; update?: string; operationId?: string; acceptedRevision?: number; conflictCopyPath?: string; revision?: number; message?: string; code?: string; [key: string]: unknown }
 type Api = <T>(path: string, init?: RequestInit) => Promise<T>;
-type RealtimeStatus = "SUBSCRIBED" | "CHANNEL_ERROR" | "TIMED_OUT" | "CLOSED" | "CONNECT_ERROR" | "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR";
+type RealtimeStatus = "SUBSCRIBED" | "CHANNEL_ERROR" | "TIMED_OUT" | "CLOSED" | "CONNECT_ERROR" | "SYSTEM_ERROR" | "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR";
 const clients = new Map<string, SupabaseClient>();
 let reportSocketEvent: ((status: "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR", closeCode?: number, wasClean?: boolean) => void) | undefined;
 class DiagnosticWebSocket extends WebSocket {
@@ -66,6 +66,9 @@ export class PKMSRealtimeSocket {
       channel.on("presence", { event: "sync" }, dispatchPeers);
       channel.on("presence", { event: "join" }, dispatchPeers);
       channel.on("presence", { event: "leave" }, dispatchPeers);
+      channel.on("system", {}, (payload: { status?: unknown; message?: unknown }) => {
+        if (payload.status === "error") void this.reportStatus("SYSTEM_ERROR", { name: "RealtimeSystemError", code: payload.message });
+      });
       channel.subscribe((status, error) => {
         if (this.closed && status === "CLOSED") return;
         if (status === "SUBSCRIBED") {
@@ -92,7 +95,7 @@ export class PKMSRealtimeSocket {
 
   private reportStatus(status: RealtimeStatus, error?: unknown, closeCode?: number, wasClean?: boolean): Promise<void> {
     return this.api<void>(`/api/workspaces/${encodeURIComponent(this.workspaceId)}/diagnostics/realtime`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, ...errorMetadata(error), closeCode, wasClean, connectionState: this.client?.realtime.connectionState() }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status, ...errorMetadata(error), closeCode, wasClean, connectionState: this.client?.realtime.connectionState(), transportClass: this.client?.realtime.transport.name, clientId: this.clientId }),
     }).then(() => {}).catch(() => {});
   }
 

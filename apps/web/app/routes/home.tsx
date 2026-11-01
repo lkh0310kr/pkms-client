@@ -307,13 +307,15 @@ export default function Home() {
     let alive = true;
     const clientId = `web-${id()}`;
     let retryTimer = 0;
+    let stableTimer = 0;
     let retries = 0;
     const connect = () => {
       if (!alive) return;
       const ws = new PKMSRealtimeSocket(activeWorkspace.id, clientId, user ?? { login: "Guest" }, api);
       socket.current = ws;
       ws.onopen = () => {
-        retries = 0;
+        window.clearTimeout(stableTimer);
+        stableTimer = window.setTimeout(() => { retries = 0; }, 30_000);
         setError((current) => current.startsWith("Live sync disconnected") ? "" : current);
         ws.send(JSON.stringify({ type: "hello", protocolVersion: 1, clientId, afterRevision: activeWorkspace.revision, user, fileId: activeRef.current.file?.id }));
         const current = activeRef.current;
@@ -362,6 +364,7 @@ export default function Home() {
       }
       };
       ws.onclose = () => {
+        window.clearTimeout(stableTimer);
         if (socket.current === ws) socket.current = null;
         setPeers([]);
         pending.current.clear();
@@ -419,7 +422,7 @@ export default function Home() {
       }, delay);
     };
     pollSyncStatus(15_000);
-    return () => { alive = false; window.clearTimeout(syncTimer); window.clearTimeout(retryTimer); socket.current?.close(); socket.current = null; setPeers([]); };
+    return () => { alive = false; window.clearTimeout(syncTimer); window.clearTimeout(retryTimer); window.clearTimeout(stableTimer); socket.current?.close(); socket.current = null; setPeers([]); };
   }, [activeWorkspace, api, user]);
 
   useEffect(() => {
