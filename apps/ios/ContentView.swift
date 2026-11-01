@@ -124,6 +124,7 @@ struct ContentView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .environment(\.defaultMinListRowHeight, 36)
         .navigationTitle(model.activeWorkspace?.repository ?? "Workspace")
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -186,6 +187,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
         }
+        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
     }
 
     private var errorPresented: Binding<Bool> {
@@ -240,6 +242,7 @@ struct ContentView: View {
             }
         }
         .listStyle(.sidebar)
+        .environment(\.defaultMinListRowHeight, 36)
         .navigationTitle("Workspace")
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -324,6 +327,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
         }
+        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
         .listRowSeparator(.hidden)
         .listRowBackground(
             model.activeFile?.id == file.id || model.activeFolderPath == file.path
@@ -366,6 +370,7 @@ struct ContentView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .environment(\.defaultMinListRowHeight, 36)
         .navigationTitle(entryName(path))
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
