@@ -142,6 +142,7 @@ export default function Home() {
   const quickOpenInput = useRef<HTMLInputElement>(null);
   const editorNavigate = useRef<((line: number) => void) | null>(null);
   const routedPath = useRef<string | null>(null);
+  const serviceRetryAt = useRef(0);
   const openFileRef = useRef<((file: FileRecord, historyAction?: FileNavigation) => Promise<void>) | null>(null);
   const docs = useRef(new Map<string, { doc: Y.Doc; persistence: IndexeddbPersistence; observer?: () => void; updateHandler?: (update: Uint8Array, origin: unknown) => void }>());
   const activeRef = useRef<{ file: FileRecord | null; doc: Y.Doc | null; text: Y.Text | null; value: string }>({ file: null, doc: null, text: null, value: "" });
@@ -174,10 +175,16 @@ export default function Home() {
   const api = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const response = await fetch(path, { credentials: "same-origin", ...init });
     if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as { message?: string; error?: string };
+      const body = await response.json().catch(() => ({})) as { message?: string; error?: string; retryAfterSeconds?: number };
       const requestId = response.headers.get("X-Request-ID") ?? (body as { requestId?: string }).requestId;
       const message = body.message ?? body.error ?? `Request failed (${response.status})`;
-      throw new Error(`${message}${requestId ? ` · ${requestId}` : ""}`);
+      const error = new Error(`${message}${requestId ? ` · ${requestId}` : ""}`) as Error & { retryAfterSeconds?: number; code?: string };
+      error.retryAfterSeconds = body.retryAfterSeconds ?? (Number(response.headers.get("Retry-After")) || undefined);
+      error.code = body.error;
+      if (body.error === "durable_objects_read_limit" && error.retryAfterSeconds) {
+        serviceRetryAt.current = Date.now() + error.retryAfterSeconds * 1000;
+      }
+      throw error;
     }
     if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;
@@ -304,6 +311,11 @@ export default function Home() {
     let retries = 0;
     const connect = () => {
       if (!alive) return;
+      const serviceDelay = serviceRetryAt.current - Date.now();
+      if (serviceDelay > 0) {
+        retryTimer = window.setTimeout(connect, serviceDelay);
+        return;
+      }
       const url = new URL(`/api/workspaces/${activeWorkspace.id}/stream`, window.location.origin);
       url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("clientId", clientId);
@@ -363,8 +375,9 @@ export default function Home() {
         pending.current.clear();
         setSaving(false);
         if (alive) {
-          const delay = Math.min(30_000, 1_000 * 2 ** Math.min(retries++, 5));
-          setError("Live sync disconnected. Reconnecting…");
+          const serviceDelay = serviceRetryAt.current - Date.now();
+          const delay = serviceDelay > 0 ? serviceDelay : Math.min(30_000, 1_000 * 2 ** Math.min(retries++, 5));
+          if (serviceDelay <= 0) setError("Live sync disconnected. Reconnecting…");
           retryTimer = window.setTimeout(connect, delay);
         }
       };
@@ -396,10 +409,26 @@ export default function Home() {
       } catch (cause) { if (alive) { setLoadingFolder(false); setError(cause instanceof Error ? cause.message : "Could not load workspace"); } }
     };
     void loadSnapshot();
-    const timer = window.setInterval(() => {
-      void api<SyncStatus>(`/api/workspaces/${activeWorkspace.id}/sync-status`).then(setSync).catch(() => {});
-    }, 15_000);
-    return () => { alive = false; window.clearInterval(timer); window.clearTimeout(retryTimer); socket.current?.close(); socket.current = null; setPeers([]); };
+    let syncTimer = 0;
+    const pollSyncStatus = (delay: number) => {
+      syncTimer = window.setTimeout(() => {
+        void api<SyncStatus>(`/api/workspaces/${activeWorkspace.id}/sync-status`).then((status) => {
+          setSync(status);
+          pollSyncStatus(15_000);
+        }).catch((cause) => {
+          if (!alive) return;
+          setError(cause instanceof Error ? cause.message : "동기화 상태를 확인하지 못했습니다.");
+          const retrySeconds = (cause as Error & { retryAfterSeconds?: number }).retryAfterSeconds;
+          if (retrySeconds) {
+            window.clearTimeout(retryTimer);
+            retryTimer = window.setTimeout(connect, retrySeconds * 1000);
+          }
+          pollSyncStatus(retrySeconds ? retrySeconds * 1000 : 15_000);
+        });
+      }, delay);
+    };
+    pollSyncStatus(15_000);
+    return () => { alive = false; window.clearTimeout(syncTimer); window.clearTimeout(retryTimer); socket.current?.close(); socket.current = null; setPeers([]); };
   }, [activeWorkspace, api, user]);
 
   useEffect(() => {

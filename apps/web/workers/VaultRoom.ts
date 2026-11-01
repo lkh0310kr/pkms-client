@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import * as Y from "yjs";
 import type { Env, WorkspaceRecord } from "./env";
 import { json } from "./crypto";
+import { durableObjectsReadLimitResponse, isDurableObjectsReadLimit } from "./serviceLimits";
 
 const FLUSH_AFTER_MS = 15 * 60 * 1000;
 const MAX_GIT_FILE_BYTES = 50 * 1024 * 1024;
@@ -257,6 +258,10 @@ export class VaultRoom extends DurableObject<Env> {
       if (url.pathname === "/upload" && request.method === "POST") return this.upload(request);
       return json({ error: "not_found" }, { status: 404 });
     } catch (error) {
+      if (isDurableObjectsReadLimit(error)) {
+        console.error(JSON.stringify({ event: "service_limit.reads", limit: "durable_objects_free_tier_daily_rows" }));
+        return durableObjectsReadLimitResponse();
+      }
       if (url.pathname === "/initialize") {
         this.setMeta("githubStatus", "failed");
         this.setMeta("githubMessage", "Repository import failed. Retry the connection.");

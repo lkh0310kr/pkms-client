@@ -4,6 +4,7 @@ import { AccountStore } from "./AccountStore";
 import { VaultRoom } from "./VaultRoom";
 import { cookie, decryptSecret, encryptSecret, json, randomToken, sessionCookie, signSession, verifySession, verifySessionDetailed } from "./crypto";
 import { handleMcpGithubCallback, handleMcpRequest, isMcpTokenActive } from "./mcp";
+import { durableObjectsReadLimitResponse, isDurableObjectsReadLimit } from "./serviceLimits";
 
 export { AccountStore, VaultRoom };
 
@@ -345,15 +346,18 @@ export default {
       // Error messages can contain upstream response bodies or user content. Keep the
       // stack frames (which identify the failing code path) without logging messages.
       const errorFrames = error instanceof Error
-        ? error.stack?.split("\n").slice(0, 5).map((frame) => frame.trim()).join(" | ")
+        ? error.stack?.split("\n").slice(1, 5).map((frame) => frame.trim()).join(" | ")
         : undefined;
       trace(requestId, "request.failed", {
         method: request.method,
         path: url.pathname,
         errorType: error instanceof Error ? error.name : "UnknownError",
+        ...(isDurableObjectsReadLimit(error) ? { reason: "durable_objects_free_tier_read_limit" } : {}),
         errorFrames,
       });
-      response = url.pathname === "/api/auth/github/callback"
+      response = isDurableObjectsReadLimit(error)
+        ? durableObjectsReadLimitResponse(requestId)
+        : url.pathname === "/api/auth/github/callback"
         ? authFailure(requestId, "oauth_callback_internal_error", 500)
         : url.pathname === "/mcp" || url.pathname.startsWith("/oauth/")
           ? json({ error: "mcp_request_failed", requestId }, { status: 500 })
