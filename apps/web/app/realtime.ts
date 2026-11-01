@@ -5,6 +5,7 @@ export interface RealtimeEnvelope { type: string; fileId?: string; update?: stri
 type Api = <T>(path: string, init?: RequestInit) => Promise<T>;
 type RealtimeStatus = "SUBSCRIBED" | "CHANNEL_ERROR" | "TIMED_OUT" | "CLOSED" | "CONNECT_ERROR" | "SYSTEM_ERROR" | "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR";
 const clients = new Map<string, SupabaseClient>();
+const realtimeTokens = new Map<string, string>();
 let reportSocketEvent: ((status: "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR", closeCode?: number, wasClean?: boolean) => void) | undefined;
 class DiagnosticWebSocket extends WebSocket {
   constructor(url: string | URL, protocols?: string | string[]) {
@@ -22,6 +23,7 @@ function sharedClient(url: string, anonKey: string): SupabaseClient {
     client = createClient(url, anonKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
       realtime: { transport: DiagnosticWebSocket, logLevel: "warn" },
+      accessToken: async () => realtimeTokens.get(key) ?? null,
     });
     clients.set(key, client);
   }
@@ -40,6 +42,7 @@ export class PKMSRealtimeSocket {
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
   onclose: (() => void) | null = null;
   private client?: SupabaseClient;
+  private clientKey?: string;
   private channel?: RealtimeChannel;
   private tokenTimer = 0;
   private closed = false;
@@ -51,6 +54,8 @@ export class PKMSRealtimeSocket {
       const config = await this.api<{ url: string; anonKey: string }>("/api/realtime/config");
       const initial = await this.api<{ token: string }>("/api/realtime/token");
       if (this.closed) return;
+      this.clientKey = `${config.url}\0${config.anonKey}`;
+      realtimeTokens.set(this.clientKey, initial.token);
       const tokenParts = initial.token.split(".");
       const encodedClaims = tokenParts[1]?.replaceAll("-", "+").replaceAll("_", "/");
       const claims = encodedClaims ? JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(encodedClaims.padEnd(Math.ceil(encodedClaims.length / 4) * 4, "=")), (char) => char.charCodeAt(0)))) as Record<string, unknown> : {};
@@ -61,7 +66,7 @@ export class PKMSRealtimeSocket {
       }).catch(() => {});
       reportSocketEvent = (status, closeCode, wasClean) => { void this.reportStatus(status, undefined, closeCode, wasClean); };
       this.client = sharedClient(config.url, config.anonKey);
-      this.client.realtime.setAuth(initial.token);
+      await this.client.realtime.setAuth(initial.token);
       const channel = this.client.channel(`pkms:${this.workspaceId}`, {
         config: { private: true, presence: { key: this.clientId }, broadcast: { self: false } },
       });
@@ -154,7 +159,8 @@ export class PKMSRealtimeSocket {
   private async refreshToken(): Promise<void> {
     try {
       const result = await this.api<{ token: string }>("/api/realtime/token");
-      this.client?.realtime.setAuth(result.token);
+      if (this.clientKey) realtimeTokens.set(this.clientKey, result.token);
+      await this.client?.realtime.setAuth(result.token);
     } catch {
       this.dispatch({ type: "error", message: "Live sync authorization expired. Reconnecting…" });
       this.close();
