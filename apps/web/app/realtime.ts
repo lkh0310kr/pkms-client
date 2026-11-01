@@ -3,10 +3,11 @@ import { createClient, type RealtimeChannel, type SupabaseClient } from "@supaba
 export interface RealtimeUser { login: string; avatarUrl?: string }
 export interface RealtimeEnvelope { type: string; fileId?: string; update?: string; operationId?: string; acceptedRevision?: number; conflictCopyPath?: string; revision?: number; message?: string; code?: string; [key: string]: unknown }
 type Api = <T>(path: string, init?: RequestInit) => Promise<T>;
-type RealtimeStatus = "SUBSCRIBED" | "CHANNEL_ERROR" | "TIMED_OUT" | "CLOSED" | "CONNECT_ERROR" | "SYSTEM_ERROR" | "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR";
+type RealtimeStatus = "SUBSCRIBED" | "CHANNEL_ERROR" | "TIMED_OUT" | "CLOSED" | "CONNECT_ERROR" | "SYSTEM_ERROR" | "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR" | "SOCKET_FRAME";
 const clients = new Map<string, SupabaseClient>();
 const realtimeTokens = new Map<string, string>();
 let reportSocketEvent: ((status: "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR", closeCode?: number, wasClean?: boolean) => void) | undefined;
+let reportSocketFrame: ((frameEvent: string, frameStatus?: string, frameErrorCode?: string) => void) | undefined;
 class DiagnosticWebSocket extends WebSocket {
   constructor(url: string | URL, protocols?: string | string[]) {
     super(url, protocols);
@@ -14,6 +15,22 @@ class DiagnosticWebSocket extends WebSocket {
     this.addEventListener("open", () => reportSocketEvent?.("SOCKET_OPEN"));
     this.addEventListener("close", (event) => reportSocketEvent?.("SOCKET_CLOSE", event.code, event.wasClean));
     this.addEventListener("error", () => reportSocketEvent?.("SOCKET_ERROR"));
+    this.addEventListener("message", (event) => {
+      if (typeof event.data !== "string") return;
+      try {
+        const frame = JSON.parse(event.data) as unknown;
+        const values = Array.isArray(frame) ? frame : [];
+        const frameEvent = values[3];
+        const payload = values[4] && typeof values[4] === "object" ? values[4] as Record<string, unknown> : {};
+        if (typeof frameEvent !== "string" || !["phx_reply", "phx_error", "phx_close", "system"].includes(frameEvent)) return;
+        const response = payload.response && typeof payload.response === "object" ? payload.response as Record<string, unknown> : {};
+        const status = typeof response.status === "string" ? response.status : typeof payload.status === "string" ? payload.status : undefined;
+        const reason = [response.reason, response.message, payload.reason, payload.message].filter((value): value is string => typeof value === "string").join(" ").toLowerCase();
+        if (frameEvent === "phx_reply" && status !== "error" && frameEvent !== "phx_error" && frameEvent !== "phx_close" && payload.status !== "error") return;
+        const code = /permission/i.test(reason) ? "permission_denied" : /jwt|token|auth/i.test(reason) ? "authorization" : /timeout|timed out/i.test(reason) ? "timeout" : undefined;
+        reportSocketFrame?.(frameEvent, status && ["ok", "error", "timeout"].includes(status) ? status : undefined, code);
+      } catch { /* Ignore non-protocol frames without inspecting their contents. */ }
+    });
   }
 }
 function sharedClient(url: string, anonKey: string): SupabaseClient {
@@ -65,6 +82,12 @@ export class PKMSRealtimeSocket {
         body: JSON.stringify({ status: "TOKEN_CHECK", clientId: this.clientId, tokenRole: claims.role, issuerMatches: claims.iss === window.location.origin, loginMatches: appMetadata.github_login === this.user.login.toLowerCase(), subjectPresent: typeof claims.sub === "string" && claims.sub.length > 0 }),
       }).catch(() => {});
       reportSocketEvent = (status, closeCode, wasClean) => { void this.reportStatus(status, undefined, closeCode, wasClean); };
+      reportSocketFrame = (frameEvent, frameStatus, frameErrorCode) => {
+        void this.api<void>(`/api/workspaces/${encodeURIComponent(this.workspaceId)}/diagnostics/realtime`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "SOCKET_FRAME", clientId: this.clientId, frameEvent, frameStatus, frameErrorCode }),
+        }).catch(() => {});
+      };
       this.client = sharedClient(config.url, config.anonKey);
       await this.client.realtime.setAuth(initial.token);
       const channel = this.client.channel(`pkms:${this.workspaceId}`, {
