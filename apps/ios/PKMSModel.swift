@@ -143,6 +143,7 @@ final class PKMSModel {
     private(set) var files: [PKMSFile] = []
     private(set) var activeWorkspace: PKMSWorkspace?
     private(set) var activeFile: PKMSFile?
+    private(set) var activeFolderPath: String?
     private(set) var markdown = ""
     private(set) var githubStatus = "synced"
     private(set) var pendingFiles = 0
@@ -273,6 +274,7 @@ final class PKMSModel {
         socket?.cancel(with: .goingAway, reason: nil)
         socketTask?.cancel(); socketSendTask?.cancel(); deviceTask?.cancel(); flushTask?.cancel()
         token = nil; user = nil; activeWorkspace = nil; activeFile = nil; document = nil
+        activeFolderPath = nil
         workspaces = []; files = []; markdown = ""
         SessionVault.clear(for: serverAddress)
     }
@@ -312,7 +314,7 @@ final class PKMSModel {
         socket?.cancel(with: .goingAway, reason: nil)
         socketTask?.cancel()
         activeWorkspace = workspace
-        activeFile = nil; document = nil; markdown = ""; files = []
+        activeFile = nil; activeFolderPath = nil; document = nil; markdown = ""; files = []
         expandedFolders = [""]
         collaborators = []
         do {
@@ -326,6 +328,7 @@ final class PKMSModel {
 
     func open(_ file: PKMSFile) async {
         dismissPreview()
+        activeFolderPath = nil
         activeFile = file
         if let socket, socket.state == .running, let encoded = try? JSONSerialization.data(withJSONObject: ["type": "presence", "fileId": file.id]), let text = String(data: encoded, encoding: .utf8) { Task { try? await socket.send(.string(text)) } }
         guard let workspace = activeWorkspace else { document = nil; markdown = ""; return }
@@ -350,6 +353,16 @@ final class PKMSModel {
             saveCache(doc, workspaceID: workspace.id, fileID: file.id)
             if socket?.state == .running { sendFullState(doc, fileID: file.id) }
         } catch { errorMessage = error.localizedDescription }
+    }
+
+    func openFolder(_ file: PKMSFile) async {
+        guard file.kind == "folder" else { return }
+        dismissPreview()
+        activeFile = nil
+        activeFolderPath = file.path
+        document = nil
+        markdown = ""
+        await loadDirectory(file.path)
     }
 
     func toggleFolder(_ file: PKMSFile) async {
@@ -424,7 +437,8 @@ final class PKMSModel {
 
     func createNote() async {
         guard let workspace = activeWorkspace else { return }
-        let filename = "Untitled-\(Int(Date.now.timeIntervalSince1970)).md"
+        let folder = activeFolderPath.map { "\($0)/" } ?? ""
+        let filename = "\(folder)Untitled-\(Int(Date.now.timeIntervalSince1970)).md"
         let body = PKMSOperationRequest(operationId: UUID().uuidString, baseRevision: workspace.revision, clientId: clientID,
             operation: .init(type: "create-file", path: filename, fileId: UUID().uuidString, content: "# Untitled\n\n"))
         do {
@@ -436,8 +450,9 @@ final class PKMSModel {
 
     func createFolder() async {
         guard let workspace = activeWorkspace else { return }
+        let folder = activeFolderPath.map { "\($0)/" } ?? ""
         let body = PKMSOperationRequest(operationId: UUID().uuidString, baseRevision: workspace.revision, clientId: clientID,
-            operation: .init(type: "create-folder", path: "New Folder"))
+            operation: .init(type: "create-folder", path: "\(folder)New Folder"))
         do { _ = try await post("/api/workspaces/\(workspace.id)/operations", body: body, as: PKMSOperationResponse.self); await reloadFiles() }
         catch { errorMessage = error.localizedDescription }
     }

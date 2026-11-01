@@ -26,7 +26,9 @@ struct ContentView: View {
                 NavigationStack(path: $compactPath) {
                     compactRoot
                         .navigationDestination(for: String.self) { fileID in
-                            if model.activeFile?.id == fileID, model.activeFile?.isMarkdown == true {
+                            if fileID.hasPrefix("folder:") {
+                                folderContents(String(fileID.dropFirst("folder:".count)))
+                            } else if model.activeFile?.id == fileID, model.activeFile?.isMarkdown == true {
                                 markdownEditor
                             } else if let file = model.files.first(where: { $0.id == fileID }) {
                                 ContentUnavailableView(entryName(file.path), systemImage: "paperclip", description: Text("This file is ready to preview."))
@@ -138,33 +140,52 @@ struct ContentView: View {
 
     private func compactFileRow(_ row: FileTreeRow) -> some View {
         let file = row.file
-        return Button {
+        return HStack(spacing: 0) {
+            Color.clear.frame(width: CGFloat(row.depth) * 16, height: 1)
             if file.kind == "folder" {
-                Task { await model.toggleFolder(file) }
-            } else {
-                Task {
-                    await model.open(file)
-                    if file.isMarkdown { compactPath.append(file.id) }
-                }
-            }
-        } label: {
-            HStack(spacing: 10) {
-                Color.clear.frame(width: CGFloat(row.depth) * 16, height: 1)
-                if file.kind == "folder" {
+                Button {
+                    Task { await model.toggleFolder(file) }
+                } label: {
                     Image(systemName: model.expandedFolders.contains(file.path) ? "chevron.down" : "chevron.right")
-                        .font(.caption2.weight(.semibold)).frame(width: 10)
-                    Image(systemName: model.expandedFolders.contains(file.path) ? "folder.fill" : "folder")
-                        .foregroundStyle(.secondary)
-                } else {
-                    Image(systemName: file.isMarkdown ? "doc.text" : "paperclip")
-                        .frame(width: 20).foregroundStyle(file.isMarkdown ? Color.accentColor : Color.secondary)
+                        .font(.caption2.weight(.semibold)).frame(width: 30, height: 42)
+                        .contentShape(Rectangle())
                 }
-                Text(entryName(file.path)).lineLimit(1)
-                Spacer(minLength: 0)
+                .buttonStyle(.plain)
+                Button {
+                    Task {
+                        await model.openFolder(file)
+                        compactPath.append("folder:\(file.path)")
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: model.expandedFolders.contains(file.path) ? "folder.fill" : "folder")
+                            .foregroundStyle(.secondary)
+                        Text(entryName(file.path)).lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button {
+                    Task {
+                        await model.open(file)
+                        if file.isMarkdown { compactPath.append(file.id) }
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: file.isMarkdown ? "doc.text" : "paperclip")
+                            .frame(width: 20).foregroundStyle(file.isMarkdown ? Color.accentColor : Color.secondary)
+                        Text(entryName(file.path)).lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
     }
 
     private var errorPresented: Binding<Bool> {
@@ -242,7 +263,9 @@ struct ContentView: View {
         }
     }
 
-    private var treeRows: [FileTreeRow] {
+    private var treeRows: [FileTreeRow] { fileRows(in: "") }
+
+    private func fileRows(in directory: String) -> [FileTreeRow] {
         let children = Dictionary(grouping: model.files) { parentPath($0.path) }
         var rows: [FileTreeRow] = []
         func append(_ parent: String, depth: Int) {
@@ -255,36 +278,57 @@ struct ContentView: View {
                 if file.kind == "folder", model.expandedFolders.contains(file.path) { append(file.path, depth: depth + 1) }
             }
         }
-        append("", depth: 0)
+        append(directory, depth: 0)
         return rows
     }
 
     private func fileRow(_ row: FileTreeRow) -> some View {
         let file = row.file
-        return Button {
-            if file.kind == "folder" { Task { await model.toggleFolder(file) } }
-            else { Task { await model.open(file) } }
-        } label: {
-            HStack(spacing: 8) {
-                Color.clear.frame(width: CGFloat(row.depth) * 14, height: 1)
-                if file.kind == "folder" {
+        return HStack(spacing: 0) {
+            Color.clear.frame(width: CGFloat(row.depth) * 14, height: 1)
+            if file.kind == "folder" {
+                Button {
+                    Task { await model.toggleFolder(file) }
+                } label: {
                     Image(systemName: model.expandedFolders.contains(file.path) ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold)).frame(width: 12)
-                    Image(systemName: model.expandedFolders.contains(file.path) ? "folder.fill" : "folder")
-                        .foregroundStyle(.secondary)
-                } else {
-                    Image(systemName: file.isMarkdown ? "doc.text" : "paperclip")
-                        .frame(width: 24).foregroundStyle(file.isMarkdown ? Color.accentColor : Color.secondary)
+                        .font(.system(size: 10, weight: .semibold)).frame(width: 26, height: 34)
+                        .contentShape(Rectangle())
                 }
-                Text(entryName(file.path)).lineLimit(1)
-                Spacer(minLength: 0)
+                .buttonStyle(.plain)
+                Button {
+                    Task { await model.openFolder(file) }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: model.expandedFolders.contains(file.path) ? "folder.fill" : "folder")
+                            .foregroundStyle(.secondary)
+                        Text(entryName(file.path)).lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .font(.subheadline).frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button {
+                    Task { await model.open(file) }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: file.isMarkdown ? "doc.text" : "paperclip")
+                            .frame(width: 20).foregroundStyle(file.isMarkdown ? Color.accentColor : Color.secondary)
+                        Text(entryName(file.path)).lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .font(.subheadline).frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
-            .font(.subheadline)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
         .listRowSeparator(.hidden)
-        .listRowBackground(model.activeFile?.id == file.id ? Color.accentColor.opacity(0.12) : nil)
+        .listRowBackground(
+            model.activeFile?.id == file.id || model.activeFolderPath == file.path
+                ? Color.accentColor.opacity(0.12) : nil
+        )
     }
 
     @ViewBuilder private var detailPane: some View {
@@ -295,12 +339,42 @@ struct ContentView: View {
             signIn
         } else if model.activeFile?.isMarkdown == true {
             markdownEditor
+        } else if let folder = model.activeFolderPath {
+            folderContents(folder)
         } else if model.activeWorkspace == nil {
             emptyWorkspace
         } else if let file = model.activeFile {
             ContentUnavailableView(entryName(file.path), systemImage: "paperclip", description: Text("This file is ready to preview."))
         } else {
             workspaceHome
+        }
+    }
+
+    private func folderContents(_ path: String) -> some View {
+        List {
+            Section {
+                let rows = fileRows(in: path)
+                if rows.isEmpty {
+                    ContentUnavailableView("This folder is empty", systemImage: "folder", description: Text("There are no items here yet."))
+                        .listRowBackground(Color.clear)
+                } else {
+                    ForEach(rows) { row in
+                        if horizontalSizeClass == .compact { compactFileRow(row) }
+                        else { fileRow(row) }
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle(entryName(path))
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("New note", systemImage: "square.and.pencil") { Task { await model.createNote() } }
+                    Button("New folder", systemImage: "folder.badge.plus") { Task { await model.createFolder() } }
+                    Button("Upload file", systemImage: "arrow.up.doc") { showingFileImporter = true }
+                } label: { Image(systemName: "plus").accessibilityLabel("Create") }
+            }
         }
     }
 
