@@ -67,7 +67,16 @@ export class PKMSRealtimeSocket {
       channel.on("presence", { event: "join" }, dispatchPeers);
       channel.on("presence", { event: "leave" }, dispatchPeers);
       channel.on("system", {}, (payload: { status?: unknown; message?: unknown }) => {
-        if (payload.status === "error") void this.reportStatus("SYSTEM_ERROR", { name: "RealtimeSystemError", code: payload.message });
+        if (payload.status === "error") {
+          const message = typeof payload.message === "string" ? payload.message : "";
+          const code = /client.*presence.*rate.*limit/i.test(message) ? "ClientPresenceRateLimitReached"
+            : /rate.*limit/i.test(message) ? "rate_limit"
+            : /jwt|token|auth/i.test(message) ? "authorization"
+            : /policy|permission/i.test(message) ? "channel_policy"
+            : /timeout|timed out/i.test(message) ? "timeout"
+            : "unclassified";
+          void this.reportStatus("SYSTEM_ERROR", { name: "RealtimeSystemError", code });
+        }
       });
       channel.subscribe((status, error) => {
         if (this.closed && status === "CLOSED") return;
