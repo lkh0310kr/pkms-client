@@ -8,7 +8,13 @@ const clients = new Map<string, SupabaseClient>();
 const realtimeTokens = new Map<string, string>();
 let reportSocketEvent: ((status: "SOCKET_CREATED" | "SOCKET_OPEN" | "SOCKET_CLOSE" | "SOCKET_ERROR", closeCode?: number, wasClean?: boolean) => void) | undefined;
 let reportSocketFrame: ((frameEvent: string, frameStatus?: string, frameErrorCode?: string) => void) | undefined;
-let reportTokenSource: ((tokenPresent: boolean) => void) | undefined;
+let reportTokenSource: ((token: string | null) => void) | undefined;
+function jwtClaims(token: string | null): Record<string, unknown> {
+  try {
+    const encoded = token?.split(".")[1]?.replaceAll("-", "+").replaceAll("_", "/");
+    return encoded ? JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=")), (char) => char.charCodeAt(0)))) as Record<string, unknown> : {};
+  } catch { return {}; }
+}
 class DiagnosticWebSocket extends WebSocket {
   constructor(url: string | URL, protocols?: string | string[]) {
     super(url, protocols);
@@ -43,7 +49,7 @@ function sharedClient(url: string, anonKey: string): SupabaseClient {
       realtime: { transport: DiagnosticWebSocket, logLevel: "warn" },
       accessToken: async () => {
         const token = realtimeTokens.get(key) ?? null;
-        reportTokenSource?.(token !== null);
+        reportTokenSource?.(token);
         return token;
       },
     });
@@ -78,18 +84,18 @@ export class PKMSRealtimeSocket {
       if (this.closed) return;
       this.clientKey = `${config.url}\0${config.anonKey}`;
       realtimeTokens.set(this.clientKey, initial.token);
-      const tokenParts = initial.token.split(".");
-      const encodedClaims = tokenParts[1]?.replaceAll("-", "+").replaceAll("_", "/");
-      const claims = encodedClaims ? JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(encodedClaims.padEnd(Math.ceil(encodedClaims.length / 4) * 4, "=")), (char) => char.charCodeAt(0)))) as Record<string, unknown> : {};
+      const claims = jwtClaims(initial.token);
       const appMetadata = claims.app_metadata && typeof claims.app_metadata === "object" ? claims.app_metadata as Record<string, unknown> : {};
       void this.api<void>(`/api/workspaces/${encodeURIComponent(this.workspaceId)}/diagnostics/realtime`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "TOKEN_CHECK", clientId: this.clientId, tokenRole: claims.role, issuerMatches: claims.iss === window.location.origin, loginMatches: appMetadata.github_login === this.user.login.toLowerCase(), subjectPresent: typeof claims.sub === "string" && claims.sub.length > 0 }),
       }).catch(() => {});
-      reportTokenSource = (tokenPresent) => {
+      reportTokenSource = (token) => {
+        const callbackClaims = jwtClaims(token);
+        const appMetadata = callbackClaims.app_metadata && typeof callbackClaims.app_metadata === "object" ? callbackClaims.app_metadata as Record<string, unknown> : {};
         void this.api<void>(`/api/workspaces/${encodeURIComponent(this.workspaceId)}/diagnostics/realtime`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "TOKEN_SOURCE", clientId: this.clientId, tokenPresent }),
+          body: JSON.stringify({ status: "TOKEN_SOURCE", clientId: this.clientId, tokenPresent: token !== null, tokenRole: callbackClaims.role, issuerMatches: callbackClaims.iss === window.location.origin, loginMatches: appMetadata.github_login === this.user.login.toLowerCase(), subjectPresent: typeof callbackClaims.sub === "string" && callbackClaims.sub.length > 0, topicMatches: /^pkms:[0-9a-f]{32}$/.test(`pkms:${this.workspaceId}`) }),
         }).catch(() => {});
       };
       reportSocketEvent = (status, closeCode, wasClean) => { void this.reportStatus(status, undefined, closeCode, wasClean); };
