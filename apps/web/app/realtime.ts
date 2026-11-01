@@ -133,7 +133,6 @@ export class PKMSRealtimeSocket {
     let envelope: RealtimeEnvelope;
     try { envelope = JSON.parse(raw) as RealtimeEnvelope; } catch { return; }
     if (envelope.type === "hello" || envelope.type === "presence") {
-      void channel.track({ clientId: this.clientId, login: this.user.login, avatarUrl: this.user.avatarUrl, fileId: envelope.fileId });
       return;
     }
     if (envelope.type !== "document-update" || !envelope.fileId || !envelope.operationId || !envelope.update) return;
