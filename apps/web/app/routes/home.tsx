@@ -314,6 +314,7 @@ export default function Home() {
       socket.current = ws;
       ws.onopen = () => {
         retries = 0;
+        setError((current) => current.startsWith("Live sync disconnected") ? "" : current);
         ws.send(JSON.stringify({ type: "hello", protocolVersion: 1, clientId, afterRevision: activeWorkspace.revision, user, fileId: activeRef.current.file?.id }));
         const current = activeRef.current;
         if (current.file && current.doc) {

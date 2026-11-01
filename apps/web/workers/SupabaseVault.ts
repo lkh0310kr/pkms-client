@@ -57,6 +57,18 @@ export async function handleVaultRequest(env:Env,login:string,workspaceId:string
   const url=new URL(request.url);const workspace=await row(env,workspaceId,login);const p=url.pathname;
   if(p==="/initialize"&&request.method==="POST")return initialize(env,login,workspaceId,await request.json() as {repository:string;branch:string;accountLogin:string});
   if(!workspace)return json({error:"not_found"},{status:404});
+  if(p==="/diagnostics/realtime"&&request.method==="POST"){
+    const body=await request.json().catch(()=>({})) as {status?:unknown;errorType?:unknown;errorCode?:unknown;closeCode?:unknown;wasClean?:unknown;connectionState?:unknown};
+    const statuses=new Set(["SUBSCRIBED","CHANNEL_ERROR","TIMED_OUT","CLOSED","CONNECT_ERROR","SOCKET_CREATED","SOCKET_OPEN","SOCKET_CLOSE","SOCKET_ERROR"]);
+    const status=typeof body.status==="string"&&statuses.has(body.status)?body.status:"INVALID_STATUS";
+    const safe=(value:unknown)=>typeof value==="string"&&/^[A-Za-z0-9_.:-]{1,64}$/.test(value)?value:undefined;
+    const closeCode=typeof body.closeCode==="number"&&Number.isInteger(body.closeCode)&&body.closeCode>=1000&&body.closeCode<=4999?body.closeCode:undefined;
+    const success=status==="SUBSCRIBED"||status==="SOCKET_CREATED"||status==="SOCKET_OPEN";
+    const event=status==="SUBSCRIBED"?"realtime.channel.subscribed":status==="SOCKET_CREATED"?"realtime.socket.created":status==="SOCKET_OPEN"?"realtime.socket.opened":status==="SOCKET_CLOSE"?"realtime.socket.closed":status==="SOCKET_ERROR"?"realtime.socket.error":"realtime.channel.failed";
+    const connectionState=typeof body.connectionState==="string"&&new Set(["connecting","open","closing","closed"]).has(body.connectionState)?body.connectionState:undefined;
+    console[success?"log":"error"](JSON.stringify({time:new Date().toISOString(),level:success?"info":"error",requestId:requestId??"missing",event,status,errorType:safe(body.errorType),errorCode:safe(body.errorCode),closeCode,wasClean:typeof body.wasClean==="boolean"?body.wasClean:undefined,connectionState}));
+    return new Response(null,{status:204});
+  }
   if(p==="/snapshot"&&request.method==="GET"){
     const list=await files(env,workspaceId,{deleted:"eq.false",order:"path.asc",...(url.searchParams.has("afterRevision")?{revision:`gt.${Number(url.searchParams.get("afterRevision"))}`}:{})},"file_id,path,kind,size,revision");
     return json({workspaceId,revision:Number(workspace.server_revision),files:list.map(fileRecord),hasMore:false,nextRevision:Number(workspace.server_revision),afterRevision:Number(url.searchParams.get("afterRevision")??0)});
