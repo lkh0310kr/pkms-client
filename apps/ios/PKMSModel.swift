@@ -251,6 +251,11 @@ final class PKMSModel {
                 await loadWorkspaces()
                 return
             } catch is CancellationError { return }
+            catch let urlError as URLError where urlError.code == .cancelled && !Task.isCancelled {
+                authLogger.warning("device poll request cancelled while sign-in remains active; retrying")
+                delay = max(flow.interval, 5)
+                continue
+            }
             catch {
                 let urlError = error as? URLError
                 let errorCode = urlError?.code.rawValue ?? 0

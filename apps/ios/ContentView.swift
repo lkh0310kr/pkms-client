@@ -1,5 +1,6 @@
 import SwiftUI
 import QuickLook
+import SafariServices
 import UniformTypeIdentifiers
 import UIKit
 
@@ -15,6 +16,7 @@ struct ContentView: View {
     @State private var showingRepositories = false
     @State private var showingSettings = false
     @State private var showingFileImporter = false
+    @State private var showingVerificationBrowser = false
     @State private var compactPath: [String] = []
     @State private var copiedDeviceCode: String?
 
@@ -53,6 +55,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingRepositories) { repositoryPicker }
         .sheet(isPresented: $showingSettings) { settingsForm }
+        .sheet(isPresented: $showingVerificationBrowser) {
+            if let url = model.verificationURL { SafariVerificationSheet(url: url) }
+        }
         .sheet(isPresented: previewPresented, onDismiss: { model.dismissPreview() }) {
             if let url = model.previewURL { QuickLookSheet(url: url) }
         }
@@ -449,7 +454,10 @@ struct ContentView: View {
                               systemImage: copiedDeviceCode == code ? "checkmark" : "doc.on.doc")
                     }
                     .buttonStyle(.bordered)
-                    if let url = model.verificationURL { Link("Open GitHub", destination: url).buttonStyle(.borderedProminent) }
+                    if model.verificationURL != nil {
+                        Button("Open GitHub") { showingVerificationBrowser = true }
+                            .buttonStyle(.borderedProminent)
+                    }
                     ProgressView("Waiting for authorization")
                         .font(.footnote).tint(.secondary)
                 }
@@ -511,4 +519,16 @@ private struct QuickLookSheet: UIViewControllerRepresentable {
         func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
         func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem { url as NSURL }
     }
+}
+
+private struct SafariVerificationSheet: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let controller = SFSafariViewController(url: url)
+        controller.dismissButtonStyle = .close
+        return controller
+    }
+
+    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
 }
