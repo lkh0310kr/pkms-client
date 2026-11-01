@@ -2,7 +2,7 @@ import * as Y from "yjs";
 import type { Env, WorkspaceRecord } from "./env";
 import { accountStore } from "./SupabaseAccountStore";
 import { json } from "./crypto";
-import { supabaseRequest, supabaseRpc } from "./supabase";
+import { SupabaseError, supabaseRequest, supabaseRpc } from "./supabase";
 
 const MAX_MARKDOWN_BYTES = 512 * 1024;
 const MAX_GIT_FILE_BYTES = 50 * 1024 * 1024;
@@ -51,7 +51,7 @@ async function publishRealtime(env:Env,workspaceId:string,message:Record<string,
   if(!response.ok)console.error(JSON.stringify({event:"realtime.broadcast.failed",status:response.status}));
 }
 
-export async function handleVaultRequest(env:Env,login:string,workspaceId:string,request:Request):Promise<Response>{
+export async function handleVaultRequest(env:Env,login:string,workspaceId:string,request:Request,requestId?:string):Promise<Response>{
   const url=new URL(request.url);const workspace=await row(env,workspaceId,login);const p=url.pathname;
   if(p==="/initialize"&&request.method==="POST")return initialize(env,login,workspaceId,await request.json() as {repository:string;branch:string;accountLogin:string});
   if(!workspace)return json({error:"not_found"},{status:404});
@@ -59,7 +59,7 @@ export async function handleVaultRequest(env:Env,login:string,workspaceId:string
     const list=await files(env,workspaceId,{deleted:"eq.false",order:"path.asc",...(url.searchParams.has("afterRevision")?{revision:`gt.${Number(url.searchParams.get("afterRevision"))}`}:{})},"file_id,path,kind,size,revision");
     return json({workspaceId,revision:Number(workspace.server_revision),files:list.map(fileRecord),hasMore:false,nextRevision:Number(workspace.server_revision),afterRevision:Number(url.searchParams.get("afterRevision")??0)});
   }
-  if(p==="/directory"&&request.method==="GET")return directory(env,login,workspace,url.searchParams.get("path")??"");
+  if(p==="/directory"&&request.method==="GET")return directory(env,login,workspace,url.searchParams.get("path")??"",requestId);
   if(p==="/sync-status"&&request.method==="GET")return syncStatus(env,workspace);
   if(p==="/flush"&&request.method==="POST"){
     const claimed=await supabaseRpc<WorkspaceRow|null>(env,"pkms_claim_workspace",{p_workspace_id:workspaceId});if(!claimed?.lease_token)return json({error:"flush_in_progress",message:"GitHub backup is already running."},{status:409,headers:{"Retry-After":"10"}});
@@ -92,23 +92,32 @@ async function initialize(env:Env,login:string,id:string,body:{repository:string
   }catch(error){return json({error:"github_import_failed",message:error instanceof GitHubError?`GitHub returned HTTP ${error.status}. Retry the connection.`:"Repository initialization failed. Retry the connection."},{status:502});}
 }
 
-async function directory(env:Env,login:string,w:WorkspaceRow,path:string):Promise<Response>{
+async function directory(env:Env,login:string,w:WorkspaceRow,path:string,requestId?:string):Promise<Response>{
   if(path&&!validPath(path))return json({error:"invalid_path"},{status:400});
   const dq=new URLSearchParams({workspace_id:`eq.${w.workspace_id}`,path:`eq.${path}`,select:"tree_sha,loaded",limit:"1"});
   const dr=await supabaseRequest(env,`/rest/v1/pkms_directories?${dq}`);const d=(await dr.json() as Array<{tree_sha:string;loaded:boolean}>)[0];if(!d)return json({error:"directory_not_found"},{status:404});
   if(!d.loaded){
+    let stage="access_token";
     try{
-      const token=await accessToken(env,login);const [owner,repo]=w.repository.split("/");const tree=await(await github(token,`/repos/${owner}/${repo}/git/trees/${d.tree_sha}`)).json() as GitHubTree;
+      const token=await accessToken(env,login);const [owner,repo]=w.repository.split("/");
+      stage="github_tree";
+      const tree=await(await github(token,`/repos/${owner}/${repo}/git/trees/${d.tree_sha}`)).json() as GitHubTree;
       if(tree.truncated)return json({error:"directory_too_large",message:"This folder is too large to display in one request."},{status:413});
       const inserts:Record<string,unknown>[]=[];const dirs:Record<string,unknown>[]=[];
       for(const e of tree.tree){if(!validPath(e.path))continue;const p=path?`${path}/${e.path}`:e.path;
         if(e.type==="tree"){inserts.push({workspace_id:w.workspace_id,file_id:`folder-${p}`,path:p,parent_path:parent(p),kind:"folder",revision:0,deleted:false,dirty:false});dirs.push({workspace_id:w.workspace_id,path:p,tree_sha:e.sha,loaded:false});}
         else if(e.type==="blob"&&["100644","100755","120000"].includes(e.mode)){const fid=await stableId(w.repository,p);inserts.push({workspace_id:w.workspace_id,file_id:fid,path:p,parent_path:parent(p),kind:isMarkdown(p)?"markdown":"asset",size:e.size??0,sha:e.sha,revision:0,deleted:false,dirty:false});}
       }
+      stage="file_cache_upsert";
       await upsertFiles(env,inserts);
-      if(dirs.length)await supabaseRequest(env,"/rest/v1/pkms_directories?on_conflict=workspace_id,path",{method:"POST",headers:{Prefer:"resolution=ignore-duplicates,return=minimal"},body:JSON.stringify(dirs)});
+      if(dirs.length){stage="directory_cache_upsert";await supabaseRequest(env,"/rest/v1/pkms_directories?on_conflict=workspace_id,path",{method:"POST",headers:{Prefer:"resolution=ignore-duplicates,return=minimal"},body:JSON.stringify(dirs)});}
+      stage="mark_directory_loaded";
       await supabaseRequest(env,`/rest/v1/pkms_directories?workspace_id=eq.${encodeURIComponent(w.workspace_id)}&path=eq.${encodeURIComponent(path)}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify({loaded:true})});
-    }catch(error){return json({error:"directory_load_failed",message:error instanceof GitHubError?`GitHub returned HTTP ${error.status}. Try again shortly.`:"Could not load this folder. Try again shortly."},{status:502});}
+    }catch(error){
+      const fields={time:new Date().toISOString(),level:"error",requestId:requestId??"missing",event:"directory.load.failed",stage,errorType:error instanceof Error?error.name:"UnknownError",...(error instanceof GitHubError?{upstream:"github",upstreamStatus:error.status}:error instanceof SupabaseError?{upstream:"supabase",upstreamStatus:error.status,upstreamCode:error.code}:{})};
+      console.error(JSON.stringify(fields));
+      return json({error:"directory_load_failed",message:error instanceof GitHubError?`GitHub returned HTTP ${error.status}. Try again shortly.`:"Could not load this folder. Try again shortly."},{status:502});
+    }
   }
   const q=new URLSearchParams({workspace_id:`eq.${w.workspace_id}`,parent_path:`eq.${path}`,deleted:"eq.false",select:"file_id,path,kind,revision,size",order:"path.asc"});
   const r=await supabaseRequest(env,`/rest/v1/pkms_files?${q}`);const list=await r.json() as FileRow[];

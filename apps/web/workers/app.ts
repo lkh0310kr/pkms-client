@@ -309,7 +309,7 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
   const internalUrl = new URL(request.url);
   internalUrl.pathname = internalPath;
   const forwarded = new Request(internalUrl, request);
-  const response = await handleVaultRequest(env, auth.login, workspaceId, forwarded);
+  const response = await handleVaultRequest(env, auth.login, workspaceId, forwarded, requestId);
   if (!internalPath.startsWith("/stream") && response.ok) {
     const clone = response.clone();
     if (internalPath === "/snapshot") {
