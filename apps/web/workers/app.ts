@@ -6,6 +6,9 @@ import { VaultRoom } from "./VaultRoom";
 import { cookie, decryptSecret, encryptSecret, json, randomToken, sessionCookie, signSession, verifySession, verifySessionDetailed } from "./crypto";
 import { handleMcpGithubCallback, handleMcpRequest, isMcpTokenActive } from "./mcp";
 import { durableObjectsReadLimitResponse, isDurableObjectsReadLimit } from "./serviceLimits";
+import { flushDueWorkspaces, handleVaultRequest } from "./SupabaseVault";
+import { issueRealtimeToken, openIdConfiguration, publicJwks } from "./realtimeAuth";
+import { supabaseRequest, supabaseRpc } from "./supabase";
 
 export { AccountStore, VaultRoom };
 
@@ -255,6 +258,13 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
     if (!auth.scopes?.includes(scope)) return json({ error: "insufficient_scope", requiredScope: scope, requestId }, { status: 403, headers: { "WWW-Authenticate": `Bearer error="insufficient_scope", scope="${scope}"` } });
   }
   if (!sameOrigin(request, env)) return json({ error: "origin_mismatch" }, { status: 403 });
+  if (request.method === "GET" && url.pathname === "/api/realtime/config") {
+    return json({ url: env.SUPABASE_URL, anonKey: env.SUPABASE_ANON_KEY });
+  }
+  if (request.method === "GET" && url.pathname === "/api/realtime/token") {
+    const issued = await issueRealtimeToken(env, auth);
+    return json(issued, { headers: { "Cache-Control": "no-store" } });
+  }
   const authCredentials = await credentials(env, auth.login);
 
   if (request.method === "GET" && url.pathname === "/api/repositories") {
@@ -279,18 +289,18 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
     const branch = body.branch || repo.default_branch;
     const id = await makeWorkspaceId(auth.login, repo.full_name, branch);
     const record: WorkspaceRecord = { id, repository: repo.full_name, branch, githubStatus: "pending", revision: 0 };
-    const room = env.VAULT_ROOMS.get(env.VAULT_ROOMS.idFromName(id));
-    const initialized = await room.fetch("https://room/initialize", {
+    const initialized = await handleVaultRequest(env, auth.login, id, new Request("https://room/initialize", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         repository: repo.full_name,
         branch,
         accountLogin: auth.login,
       }),
-    });
+    }));
     if (!initialized.ok) return initialized;
-    const saved = await account(env, auth.login).fetch("https://account/workspaces", { method: "PUT", body: JSON.stringify(record) });
-    return json({ ...(await saved.json() as object), workspace: record }, { status: 201 });
+    const saved = await account(env, auth.login).fetch("https://account/workspaces");
+    const savedList = await saved.json() as { workspaces: WorkspaceRecord[] };
+    return json({ workspace: savedList.workspaces.find((item) => item.id === id) ?? record }, { status: 201 });
   }
 
   const match = url.pathname.match(/^\/api\/workspaces\/([^/]+)(\/.*)?$/);
@@ -303,9 +313,8 @@ async function api(request: Request, env: Env, requestId: string): Promise<Respo
   const internalPath = match[2] || "/snapshot";
   const internalUrl = new URL(request.url);
   internalUrl.pathname = internalPath;
-  const room = env.VAULT_ROOMS.get(env.VAULT_ROOMS.idFromName(workspaceId));
   const forwarded = new Request(internalUrl, request);
-  const response = await room.fetch(forwarded);
+  const response = await handleVaultRequest(env, auth.login, workspaceId, forwarded);
   if (!internalPath.startsWith("/stream") && response.ok) {
     const clone = response.clone();
     if (internalPath === "/snapshot") {
@@ -323,15 +332,71 @@ async function makeWorkspaceId(login: string, repository: string, branch: string
   return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, "0")).join("").slice(0, 32);
 }
 
+interface LegacyFileExport { file_id: string; path: string; kind: "markdown"|"asset"|"folder"; content: string|null; object_key: string|null; size: number; sha: string|null; previous_path: string|null; revision: number; deleted: number; dirty: number }
+interface LegacyVaultExport { metadata: Record<string,string>; files: LegacyFileExport[]; documents: Array<{file_id:string;state_update:string}> }
+
+async function migrateLegacyState(request: Request, env: Env): Promise<Response> {
+  if (!env.MIGRATION_SECRET || request.headers.get("Authorization") !== `Bearer ${env.MIGRATION_SECRET}`) return json({ error: "unauthorized" }, { status: 401 });
+  if (env.PKMS_MAINTENANCE !== "true") return json({ error: "maintenance_lock_required" }, { status: 409 });
+  try {
+    const legacyAccount = env.ACCOUNTS.get(env.ACCOUNTS.idFromName("lkh0310kr"));
+    const exported = await legacyAccount.fetch("https://account/__migration/export");
+    if (!exported.ok) throw new Error("legacy_account_export_failed");
+    const accountRows = await exported.json() as Array<{key:string;value:string}>;
+    let workspaceRecords: WorkspaceRecord[] = [];
+    for (const item of accountRows) {
+      if (item.key === "credentials") {
+        await supabaseRequest(env,"/rest/v1/pkms_account_values?on_conflict=account_login,value_key",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify({account_login:"lkh0310kr",value_key:"credentials",value:JSON.parse(item.value)})});
+      } else if (item.key === "workspaces") {
+        workspaceRecords = JSON.parse(item.value) as WorkspaceRecord[];
+      } else if (item.key.startsWith("mcp:")) {
+        const parsed = JSON.parse(item.value) as {value:unknown;expiresAt:number};
+        await supabaseRequest(env,"/rest/v1/pkms_account_values?on_conflict=account_login,value_key",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify({account_login:"__pkms_mcp_oauth__",value_key:item.key,value:parsed})});
+      }
+    }
+    let migratedWorkspaces=0,migratedFiles=0,migratedDocuments=0;
+    for (const workspace of workspaceRecords) {
+      const room=env.VAULT_ROOMS.get(env.VAULT_ROOMS.idFromName(workspace.id));
+      const response=await room.fetch("https://room/__migration/export");
+      if(!response.ok)throw new Error("legacy_workspace_export_failed");
+      const state=await response.json() as LegacyVaultExport;
+      const metadata=state.metadata;
+      if(!metadata.repository||!metadata.branch||!metadata.head||!metadata.tree)continue;
+      const hasPendingChanges=state.files.some(file=>Boolean(file.dirty)||Boolean(file.deleted));
+      await supabaseRpc(env,"pkms_initialize_workspace",{p_workspace_id:workspace.id,p_owner_login:"lkh0310kr",p_repository:metadata.repository,p_branch:metadata.branch,p_head:metadata.head,p_tree_sha:metadata.tree});
+      await supabaseRequest(env,`/rest/v1/pkms_workspaces?workspace_id=eq.${encodeURIComponent(workspace.id)}`,{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify({server_revision:Number(metadata.revision??workspace.revision),github_status:hasPendingChanges?"pending":metadata.githubStatus??workspace.githubStatus,github_message:metadata.githubMessage||null,last_github_commit_at:metadata.lastGitHubCommitAt||null,flush_due_at:(metadata.githubStatus==="pending"||hasPendingChanges)?new Date(Date.now()+15*60_000).toISOString():null})});
+      await supabaseRequest(env,"/rest/v1/pkms_directories?on_conflict=workspace_id,path",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify({workspace_id:workspace.id,path:"",tree_sha:metadata.tree,loaded:false})});
+      if(state.files.length){
+        await supabaseRequest(env,"/rest/v1/pkms_files?on_conflict=workspace_id,file_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(state.files.map(file=>({workspace_id:workspace.id,file_id:file.file_id,path:file.path,parent_path:file.path.includes("/")?file.path.slice(0,file.path.lastIndexOf("/")):"",kind:file.kind,content:file.content,object_key:file.object_key,size:file.size,sha:file.sha,previous_path:file.previous_path,revision:file.revision,deleted:Boolean(file.deleted),dirty:Boolean(file.dirty)})))});
+      }
+      if(state.documents.length){
+        await supabaseRequest(env,"/rest/v1/pkms_documents?on_conflict=workspace_id,file_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(state.documents.map(doc=>({workspace_id:workspace.id,file_id:doc.file_id,state_update_b64:doc.state_update,compacted_revision:0})))});
+      }
+      migratedWorkspaces++;migratedFiles+=state.files.length;migratedDocuments+=state.documents.length;
+    }
+    return json({ok:true,migratedWorkspaces,migratedFiles,migratedDocuments,migratedAccountValues:accountRows.length});
+  } catch {
+    return json({error:"legacy_migration_failed",message:"Legacy storage migration failed. Source data was kept intact; retry after reviewing migration status."},{status:502});
+  }
+}
+
 const requestHandler = createRequestHandler(() => import("virtual:react-router/server-build"), import.meta.env.MODE);
 
 export default {
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(flushDueWorkspaces(env));
+  },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
     const startedAt = Date.now();
     let response: Response;
     try {
+      if (request.method === "POST" && url.pathname === "/__internal/migrate/legacy") response = await migrateLegacyState(request, env);
+      else if (env.PKMS_MAINTENANCE === "true") response = json({ error: "maintenance", message: "PKMS is briefly unavailable during storage migration." }, { status: 503, headers: { "Retry-After": "60" } });
+      else if (request.method === "GET" && url.pathname === "/.well-known/openid-configuration") response = json(openIdConfiguration(env));
+      else if (request.method === "GET" && url.pathname === "/.well-known/jwks.json") response = json(publicJwks());
+      else {
       const mcpResponse = await handleMcpRequest(request, env, requestId, {
         dispatchApi: (input, bindings, id) => api(input, bindings, id),
         saveGitHubGrant,
@@ -342,6 +407,7 @@ export default {
         if (mcpCallback) response = mcpCallback;
         else if (url.pathname.startsWith("/api/")) response = await api(request, env, requestId);
         else response = await requestHandler(request);
+      }
       }
     } catch (error) {
       // Error messages can contain upstream response bodies or user content. Keep the

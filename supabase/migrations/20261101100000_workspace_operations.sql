@@ -84,7 +84,7 @@ begin
       v_conflict:=public.pkms_unique_conflict_path(p_workspace_id,v_path,p_client_id);
       v_path:=v_conflict;
     end if;
-    v_file_id:=coalesce(nullif(p_operation->>'fileId',''),case when v_type='create-folder' then 'folder-'||v_path else extensions.gen_random_uuid()::text end);
+    v_file_id:=coalesce(nullif(p_operation->>'fileId',''),case when v_type='create-folder' then 'folder-'||v_path else gen_random_uuid()::text end);
     v_parent:=public.pkms_path_parent(v_path);
     while v_parent<>'' loop
       if not exists(select 1 from public.pkms_files where workspace_id=p_workspace_id and path=v_parent and not deleted) then

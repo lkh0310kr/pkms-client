@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { IndexeddbPersistence } from "y-indexeddb";
 import * as Y from "yjs";
+import { PKMSRealtimeSocket } from "../realtime";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 import type { Route } from "./+types/home";
 
@@ -137,7 +138,7 @@ export default function Home() {
   const [showRepositories, setShowRepositories] = useState(false);
   const [saving, setSaving] = useState(false);
   const [peers, setPeers] = useState<Peer[]>([]);
-  const socket = useRef<WebSocket | null>(null);
+  const socket = useRef<PKMSRealtimeSocket | null>(null);
   const treeRef = useRef<HTMLElement>(null);
   const quickOpenInput = useRef<HTMLInputElement>(null);
   const editorNavigate = useRef<((line: number) => void) | null>(null);
@@ -190,7 +191,7 @@ export default function Home() {
     return response.json() as Promise<T>;
   }, []);
 
-  const saveMarkdownToGitHub = useCallback(async (fileId: string, doc: Y.Doc) => {
+  const saveMarkdownToGitHub = useCallback(async (fileId: string, doc: Y.Doc, flushToGitHub = true) => {
     const workspaceId = activeWorkspace?.id;
     if (!workspaceId) return;
     setSaving(true);
@@ -200,10 +201,13 @@ export default function Home() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ operationId: id(), fileId, update: toBase64(Y.encodeStateAsUpdate(doc)) }),
       });
-      const status = await api<SyncStatus>(`/api/workspaces/${workspaceId}/flush`, { method: "POST" });
+      const status = flushToGitHub
+        ? await api<SyncStatus>(`/api/workspaces/${workspaceId}/flush`, { method: "POST" })
+        : await api<SyncStatus>(`/api/workspaces/${workspaceId}/sync-status`);
       if (activeRef.current.file?.id === fileId && activeWorkspace?.id === workspaceId) {
         setSync(status);
-        if (status.githubStatus === "synced") setNotice("Saved to GitHub");
+        if (flushToGitHub && status.githubStatus === "synced") setNotice("Saved to GitHub");
+        else if (!flushToGitHub) setNotice("Saved");
         else if (status.githubStatus === "external-change") setError(status.message ?? "GitHub changed outside PKMS.");
         else setNotice("Saved locally");
       }
@@ -221,7 +225,7 @@ export default function Home() {
     if (previous !== undefined) window.clearTimeout(previous);
     const timer = window.setTimeout(() => {
       autoSaveTimers.current.delete(key);
-      void saveMarkdownToGitHub(fileId, doc);
+      void saveMarkdownToGitHub(fileId, doc, false);
     }, 5_000);
     autoSaveTimers.current.set(key, timer);
   }, [saveMarkdownToGitHub]);
@@ -316,10 +320,7 @@ export default function Home() {
         retryTimer = window.setTimeout(connect, serviceDelay);
         return;
       }
-      const url = new URL(`/api/workspaces/${activeWorkspace.id}/stream`, window.location.origin);
-      url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      url.searchParams.set("clientId", clientId);
-      const ws = new WebSocket(url);
+      const ws = new PKMSRealtimeSocket(activeWorkspace.id, clientId, user ?? { login: "Guest" }, api);
       socket.current = ws;
       ws.onopen = () => {
         retries = 0;
@@ -381,7 +382,7 @@ export default function Home() {
           retryTimer = window.setTimeout(connect, delay);
         }
       };
-      ws.onerror = () => ws.close();
+      void ws.connect();
     };
     connect();
     const loadSnapshot = async () => {

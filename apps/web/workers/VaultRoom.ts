@@ -229,6 +229,7 @@ export class VaultRoom extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     try {
+      if (request.method === "GET" && url.pathname === "/__migration/export") return this.exportMigrationState();
       if (url.pathname === "/initialize" && request.method === "POST") return this.initialize(await request.json() as { repository: string; branch: string; accountLogin: string });
       if (!this.getMeta("repository")) return json({ error: "workspace_not_initialized" }, { status: 409 });
       if (url.pathname === "/snapshot" && request.method === "GET") return this.snapshot(url);
@@ -272,6 +273,23 @@ export class VaultRoom extends DurableObject<Env> {
       console.error(JSON.stringify({ event: url.pathname === "/directory" ? "directory.list.failed" : "worker_internal_error", errorType: error instanceof Error ? error.name : "unknown", ...(error instanceof GitHubRequestError ? { upstreamStatus: error.status } : {}) }));
       return json({ error: "internal_error", message: "The request could not be completed." }, { status: 500 });
     }
+  }
+
+  private exportMigrationState(): Response {
+    const files = this.ctx.storage.sql.exec<FileRow>("SELECT * FROM files WHERE dirty=1 ORDER BY revision,file_id").toArray();
+    const documents = this.ctx.storage.sql.exec<{ [key: string]: SqlStorageValue; file_id: string; state_update: ArrayBuffer }>(
+      "SELECT d.file_id,d.state_update FROM documents d JOIN files f ON f.file_id=d.file_id WHERE f.dirty=1 ORDER BY d.file_id"
+    ).toArray().map((row) => ({ file_id: row.file_id, state_update: b64(asBytes(row.state_update)) }));
+    const metadata: Record<string,string> = {};
+    for (const key of ["repository","branch","head","tree","revision","githubStatus","githubMessage","lastGitHubCommitAt","accountLogin"]) {
+      const value = this.getMeta(key);
+      if (value !== undefined) metadata[key] = value;
+    }
+    return json({
+      metadata,
+      files: files.map(({file_id,path,kind,content,object_key,size,sha,previous_path,revision,deleted,dirty})=>({file_id,path,kind,content,object_key,size,sha,previous_path,revision,deleted,dirty})),
+      documents,
+    });
   }
 
   private snapshot(url: URL): Response {

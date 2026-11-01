@@ -51,6 +51,10 @@ export class AccountStore extends DurableObject<Env> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/__migration/export") {
+      const rows = this.ctx.storage.sql.exec<AccountRow>("SELECT key,value FROM account ORDER BY key").toArray();
+      return json(rows.map(({ key, value }) => ({ key, value })));
+    }
     if (request.method === "GET" && url.pathname === "/credentials") {
       const value = this.get("credentials");
       return value ? json(JSON.parse(value)) : json({ error: "not_connected" }, { status: 404 });

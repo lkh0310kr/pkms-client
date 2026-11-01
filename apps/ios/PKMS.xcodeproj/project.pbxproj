@@ -13,6 +13,7 @@
 		A10000000000000000000004 /* PKMSModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* PKMSModel.swift */; };
 		A10000000000000000000005 /* SessionVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* SessionVault.swift */; };
 		A10000000000000000000006 /* Frameworks/PKMSRustFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* Frameworks/PKMSRustFFI.xcframework */; };
+		A10000000000000000000007 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = A2000000000000000000000A /* Supabase */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +34,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000006 /* Frameworks/PKMSRustFFI.xcframework in Frameworks */,
+				A10000000000000000000007 /* Supabase in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -88,6 +90,9 @@
 			name = PKMS;
 			productName = PKMS;
 			productReference = A20000000000000000000008 /* PKMS.app */;
+			packageProductDependencies = (
+				A2000000000000000000000A /* Supabase */,
+			);
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -113,6 +118,9 @@
 				Base,
 			);
 			mainGroup = A40000000000000000000001;
+			packageReferences = (
+				A2000000000000000000000B /* XCRemoteSwiftPackageReference \"supabase-swift\" */,
+			);
 			productRefGroup = A40000000000000000000003 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -236,6 +244,22 @@
 			};
 			name = Release;
 		};
+/* Begin XCRemoteSwiftPackageReference section */
+		A2000000000000000000000B /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift.git";
+			requirement = { kind = upToNextMajorVersion; minimumVersion = 2.51.0; };
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A2000000000000000000000A /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A2000000000000000000000B /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
+
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */

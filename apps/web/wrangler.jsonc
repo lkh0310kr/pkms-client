@@ -8,12 +8,16 @@
     "directory": "./build/client",
     "binding": "ASSET_FILES"
   },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
   "observability": {
     "enabled": true,
     "logs": { "enabled": true, "invocation_logs": true, "head_sampling_rate": 1 }
   },
   "vars": {
-    "PUBLIC_ORIGIN": "https://pkms-cloud.lkh0310kr.workers.dev"
+    "PUBLIC_ORIGIN": "https://pkms-cloud.lkh0310kr.workers.dev",
+    "PKMS_REALTIME_KEY_ID": "pkms-64825bda-dec8-4a78-b684-25f96cb3ae2f"
   },
   "durable_objects": {
     "bindings": [

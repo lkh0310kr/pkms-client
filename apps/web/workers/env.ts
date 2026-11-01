@@ -12,6 +12,8 @@ export interface Env {
   SUPABASE_ANON_KEY: string;
   PKMS_REALTIME_PRIVATE_KEY: string;
   PKMS_REALTIME_KEY_ID: string;
+  MIGRATION_SECRET?: string;
+  PKMS_MAINTENANCE?: string;
 }
 
 export interface Session {
