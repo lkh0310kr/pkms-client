@@ -218,8 +218,9 @@ async function invokeTool(
       body: JSON.stringify({ operationId: crypto.randomUUID(), fileId: file.id, update }),
     }), env, requestId, dependencies);
     if (!response.ok) {
-      console.error("mcp_write_file_failed", { requestId, status: response.status });
-      return toolError(`Could not save the Markdown file through PKMS (HTTP ${response.status}, request ${requestId}).`);
+      const failure = await response.json().catch(() => ({})) as { code?: string };
+      console.error("mcp_write_file_failed", { requestId, status: response.status, code: failure.code ?? "unknown" });
+      return toolError(`Could not save the Markdown file through PKMS (HTTP ${response.status}, ${failure.code ?? "unknown"}, request ${requestId}).`);
     }
     return toolResult({ path, ...(await response.json() as Record<string, unknown>) });
   }
