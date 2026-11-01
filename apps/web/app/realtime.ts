@@ -83,6 +83,8 @@ export class PKMSRealtimeSocket {
             : /permission denied.*(table|schema)/i.test(message) ? "database_privilege"
             : /not authorized|unauthorized/i.test(message) ? "unauthorized"
             : /policy/i.test(message) ? "policy_check"
+            : /permission[s]?[^.]{0,40}to read|read[^.]{0,40}permission/i.test(message) ? "read_permission_denied"
+            : /permission[s]?[^.]{0,40}to write|write[^.]{0,40}permission/i.test(message) ? "write_permission_denied"
             : /permission/i.test(message) ? "permission_denied"
             : /jwt|token|auth/i.test(message) ? "authorization"
             : /timeout|timed out/i.test(message) ? "timeout"
