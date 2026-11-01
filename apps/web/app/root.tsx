@@ -2,7 +2,10 @@ import type { LinksFunction, MetaFunction } from "react-router";
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
 import styles from "./styles.css?url";
 
-export const links: LinksFunction = () => [{ rel: "stylesheet", href: styles }];
+export const links: LinksFunction = () => [
+  { rel: "stylesheet", href: styles },
+  { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
+];
 export const meta: MetaFunction = () => [
   { title: "PKMS — your Markdown workspace" },
   { name: "description", content: "Markdown files synced with GitHub." },

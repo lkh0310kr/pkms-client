@@ -12,6 +12,102 @@ function selectionTouches(state: EditorState, from: number, to: number): boolean
   return state.selection.ranges.some((range) => range.from <= to && range.to >= from);
 }
 
+function taskMarker(text: string): { from: number; checked: boolean } | null {
+  const match = /^\s*(?:[-+*]|\d+[.)])\s+\[([ xX])\](?:\s|$)/.exec(text);
+  if (!match) return null;
+  return { from: match[0].lastIndexOf("["), checked: match[1].toLowerCase() === "x" };
+}
+
+function splitTableCells(text: string): string[] {
+  const source = text.trim();
+  const cells: string[] = [];
+  let cell = "";
+  for (let index = 0; index < source.length; index++) {
+    const character = source[index];
+    if (character === "\\" && source[index + 1] === "|") { cell += "|"; index++; }
+    else if (character === "|") { cells.push(cell.trim()); cell = ""; }
+    else cell += character;
+  }
+  cells.push(cell.trim());
+  if (source.startsWith("|")) cells.shift();
+  if (source.endsWith("|") && !source.endsWith("\\|")) cells.pop();
+  return cells;
+}
+
+function tableAlignment(text: string): ("left" | "center" | "right")[] | null {
+  const cells = splitTableCells(text);
+  if (cells.length < 1 || cells.some((cell) => !/^:?-{3,}:?$/.test(cell))) return null;
+  return cells.map((cell) => cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : "left");
+}
+
+class DividerWidget extends WidgetType {
+  constructor(readonly from: number) { super(); }
+  eq(other: DividerWidget) { return other.from === this.from; }
+  ignoreEvent() { return true; }
+  toDOM(view: EditorView) {
+    const divider = document.createElement("div");
+    divider.className = "cm-live-divider-widget";
+    divider.setAttribute("aria-label", "Markdown divider");
+    divider.appendChild(document.createElement("hr"));
+    divider.addEventListener("click", (event) => { event.stopPropagation(); view.dispatch({ selection: { anchor: this.from }, scrollIntoView: true }); view.focus(); });
+    return divider;
+  }
+}
+
+class TaskCheckboxWidget extends WidgetType {
+  constructor(readonly from: number, readonly to: number, readonly checked: boolean) { super(); }
+  eq(other: TaskCheckboxWidget) { return other.from === this.from && other.to === this.to && other.checked === this.checked; }
+  ignoreEvent() { return true; }
+  toDOM(view: EditorView) {
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = this.checked;
+    checkbox.className = "cm-live-task-checkbox";
+    checkbox.setAttribute("aria-label", this.checked ? "Mark task incomplete" : "Mark task complete");
+    checkbox.addEventListener("mousedown", (event) => event.stopPropagation());
+    checkbox.addEventListener("click", (event) => event.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      view.dispatch({ changes: { from: this.from, to: this.to, insert: checkbox.checked ? "[x]" : "[ ]" } });
+    });
+    return checkbox;
+  }
+}
+
+class TablePreviewWidget extends WidgetType {
+  constructor(readonly from: number, readonly headers: string[], readonly rows: string[][], readonly alignments: ("left" | "center" | "right")[], readonly rowStarts: number[]) { super(); }
+  eq(other: TablePreviewWidget) {
+    return other.from === this.from && JSON.stringify(other.headers) === JSON.stringify(this.headers) && JSON.stringify(other.rows) === JSON.stringify(this.rows) && JSON.stringify(other.alignments) === JSON.stringify(this.alignments) && JSON.stringify(other.rowStarts) === JSON.stringify(this.rowStarts);
+  }
+  ignoreEvent() { return true; }
+  toDOM(view: EditorView) {
+    const container = document.createElement("div");
+    container.className = "cm-live-table-widget";
+    const table = document.createElement("table");
+    const head = table.createTHead().insertRow();
+    this.headers.forEach((text, index) => {
+      const cell = document.createElement("th"); cell.textContent = text; cell.style.textAlign = this.alignments[index] ?? "left"; head.appendChild(cell);
+    });
+    const body = table.createTBody();
+    this.rows.forEach((row, rowIndex) => {
+      const tr = body.insertRow();
+      this.headers.forEach((_, cellIndex) => {
+        const cell = tr.insertCell(); cell.textContent = row[cellIndex] ?? ""; cell.style.textAlign = this.alignments[cellIndex] ?? "left";
+      });
+      tr.dataset.sourceRow = String(rowIndex + 2);
+    });
+    head.dataset.sourceRow = "0";
+    container.appendChild(table);
+    container.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const row = (event.target as HTMLElement).closest<HTMLElement>("[data-source-row]");
+      const lineIndex = Number(row?.dataset.sourceRow ?? 0);
+      view.dispatch({ selection: { anchor: this.rowStarts[lineIndex] ?? this.from }, scrollIntoView: true });
+      view.focus();
+    });
+    return container;
+  }
+}
+
 function collectInline(view: EditorView): DecorationSet {
   const ranges: { from: number; to: number; decoration: Decoration }[] = [];
   const add = (from: number, to: number, decoration: Decoration) => {
@@ -46,10 +142,14 @@ function collectInline(view: EditorView): DecorationSet {
         return;
       }
       if (name === "Link") {
+        const sourceLine = view.state.doc.lineAt(node.from);
+        const task = taskMarker(sourceLine.text);
+        if (task && node.from >= sourceLine.from + task.from && node.from < sourceLine.from + task.from + 3) return;
         const marks = node.node.getChildren("LinkMark");
         const url = node.node.getChild("URL");
         if (marks.length < 2 || marks[0].to >= marks[1].from) return;
         add(marks[0].to, marks[1].from, Decoration.mark({ class: "cm-live-link" }));
+        if (url) add(url.from, url.to, Decoration.mark({ class: "cm-live-link-url" }));
         if (!raw) {
           add(marks[0].from, marks[0].to, hide);
           add(marks[1].from, Math.min(node.to, url ? url.to + 1 : marks[1].to), hide);
@@ -69,8 +169,14 @@ function collectInline(view: EditorView): DecorationSet {
         const mark = node.node.getChild("ListMark");
         if (mark) {
           const line = view.state.doc.lineAt(mark.from);
-          if (!selectionTouches(view.state, line.from, mark.to)) add(mark.from, mark.to, Decoration.replace({ widget: new ListMarker(view.state.doc.sliceString(mark.from, mark.to)) }));
+          if (taskMarker(line.text)) {
+            if (!selectionTouches(view.state, line.from, line.to)) add(mark.from, mark.to, hide);
+          } else if (!selectionTouches(view.state, line.from, mark.to)) add(mark.from, mark.to, Decoration.replace({ widget: new ListMarker(view.state.doc.sliceString(mark.from, mark.to)) }));
         }
+        return;
+      }
+      if (name === "HorizontalRule" && !raw) {
+        add(node.from, node.to, Decoration.replace({ widget: new DividerWidget(node.from), block: true }));
         return;
       }
       if (name === "FencedCode" && !raw) {
@@ -83,6 +189,48 @@ function collectInline(view: EditorView): DecorationSet {
         }
       }
     }});
+  }
+  const document = view.state.doc;
+  const checkedTables = new Set<number>();
+  for (const visible of view.visibleRanges) {
+    const firstVisible = document.lineAt(visible.from).number;
+    const lastVisible = document.lineAt(visible.to).number;
+    for (let number = firstVisible; number <= lastVisible; number++) {
+      const visibleLine = document.line(number);
+      const task = taskMarker(visibleLine.text);
+      if (task && !selectionTouches(view.state, visibleLine.from, visibleLine.to)) {
+        const from = visibleLine.from + task.from;
+        add(from, from + 3, Decoration.replace({ widget: new TaskCheckboxWidget(from, from + 3, task.checked) }));
+      }
+      if (!visibleLine.text.includes("|")) continue;
+      let headerNumber = number;
+      while (headerNumber > 1 && document.line(headerNumber - 1).text.includes("|")) headerNumber--;
+      if (checkedTables.has(headerNumber)) continue;
+      const header = document.line(headerNumber);
+      const separator = headerNumber < document.lines ? document.line(headerNumber + 1) : null;
+      const alignments = separator ? tableAlignment(separator.text) : null;
+      if (!alignments || !header.text.includes("|")) continue;
+      const headers = splitTableCells(header.text);
+      if (headers.length !== alignments.length) continue;
+      const rows: string[][] = [];
+      const rowStarts = [header.from, separator!.from];
+      let end = separator!.to;
+      for (let rowNumber = headerNumber + 2; rowNumber <= document.lines; rowNumber++) {
+        const line = document.line(rowNumber);
+        if (!line.text.trim() || !line.text.includes("|")) break;
+        rows.push(splitTableCells(line.text));
+        rowStarts.push(line.from);
+        end = line.to;
+      }
+      checkedTables.add(headerNumber);
+      let insideCode = false;
+      syntaxTree(view.state).iterate({ from: header.from, to: end, enter(node) {
+        if (node.type.name === "FencedCode" && node.from <= header.from && node.to >= end) insideCode = true;
+      }});
+      if (!insideCode && !selectionTouches(view.state, header.from, end)) {
+        add(header.from, end, Decoration.replace({ widget: new TablePreviewWidget(header.from, headers, rows, alignments, rowStarts), block: true }));
+      }
+    }
   }
   ranges.sort((a, b) => a.from - b.from || a.to - b.to);
   const builder = new RangeSetBuilder<Decoration>();
