@@ -30,6 +30,8 @@ Supabase stores edits and schedules them for GitHub backup 15 minutes after the 
 
 Deploy with `npm run deploy` after authenticating Wrangler using `npx wrangler login`. Configure Supabase secrets and the R2 bucket binding in `wrangler.jsonc` first. The cutover deletes the old Durable Object namespaces; after deployment, sign in to GitHub again and reconnect the repositories you use. GitHub remains the source of note contents.
 
+Pushes to `main` that change the web app, root npm manifests, or deployment workflow deploy automatically through GitHub Actions. Add a Cloudflare API token with Workers deployment permissions as the `CLOUDFLARE_API_TOKEN` repository secret in GitHub. Manual runs are available from Actions → Deploy web → Run workflow.
+
 ## Current scope
 
 - GitHub App OAuth login and token refresh; no long-lived GitHub token is sent to browser storage.
