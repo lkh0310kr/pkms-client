@@ -198,8 +198,10 @@ async function invokeTool(
     const Y = await import("yjs");
     const doc = new Y.Doc({ guid: file.id });
     Y.applyUpdate(doc, decodeBase64(currentData.update));
+    const baseStateVector = Y.encodeStateVector(doc);
     const text = doc.getText("markdown");
     const previous = text.toString();
+    if (previous === content) return toolResult({ path, revision: file.revision, unchanged: true });
     if (previous !== content) {
       let prefix = 0;
       while (prefix < previous.length && prefix < content.length && previous.charCodeAt(prefix) === content.charCodeAt(prefix)) prefix++;
@@ -212,7 +214,7 @@ async function invokeTool(
         if (inserted) text.insert(prefix, inserted);
       }, "codex-mcp");
     }
-    const update = encodeBase64(Y.encodeStateAsUpdate(doc));
+    const update = encodeBase64(Y.encodeStateAsUpdate(doc, baseStateVector));
     const response = await callApi(new Request(`${base}/api/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(file.id)}/updates`, {
       method: "POST", headers: { Authorization: request.headers.get("Authorization") ?? "", "Content-Type": "application/json" },
       body: JSON.stringify({ operationId: crypto.randomUUID(), fileId: file.id, update }),
