@@ -458,11 +458,18 @@ struct ContentView: View {
                 Button {
                     Task { await model.beginSignIn() }
                 } label: {
-                    Label("Continue with GitHub", systemImage: "arrow.up.right")
-                        .font(.headline).frame(maxWidth: 300).padding(.vertical, 5)
+                    Group {
+                        if model.isSigningIn {
+                            HStack(spacing: 9) { ProgressView().tint(.white); Text("Connecting…") }
+                        } else {
+                            Label("Continue with GitHub", systemImage: "arrow.up.right")
+                        }
+                    }
+                    .font(.headline).frame(maxWidth: 300).padding(.vertical, 5)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .disabled(model.isSigningIn)
             }
         }
         .padding(28)
