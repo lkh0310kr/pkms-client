@@ -15,7 +15,7 @@
   --danger: #b42318;
   --warning: #a16207;
   --accent: #606ac8;
-  --editor-font: ui-serif, Georgia, 'Times New Roman', serif;
+  --editor-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --scroll-size: 8px;
   --scroll-thumb: rgba(121, 121, 121, .4);
   font-family: Geist, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -67,7 +67,7 @@ button { cursor: pointer; }
 .mini-button.active { color: var(--text); background: var(--selected); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 .workspace-select { padding: 12px 7px 15px; border-top: 1px solid var(--border); }
-.eyebrow { color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.eyebrow { color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: .01em; }
 .workspace-select select { display: block; width: 100%; margin-top: 7px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px; outline-color: var(--muted); color: var(--text); background: var(--surface); font-size: 12px; }
 .connect-link { display: flex; width: 100%; justify-content: space-between; margin-top: 8px; padding: 2px 0; border: 0; color: var(--text); background: transparent; text-align: left; font-size: 12px; }
 .connect-link:hover { color: var(--muted); }
@@ -96,10 +96,7 @@ button { cursor: pointer; }
 .file-icon, .folder-icon { flex: 0 0 15px; color: var(--muted); text-align: center; }
 .file-icon .app-icon { width: 14px; height: 14px; margin: 0 auto; }
 .sidebar-bottom { margin-top: auto; padding: 10px 5px 0; border-top: 1px solid var(--border); }
-.sync-indicator { display: flex; align-items: center; gap: 7px; padding: 3px 3px 10px; color: var(--muted); font-size: 11px; }
 .status-dot { display: inline-block; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--subtle); }
-.sync-indicator.synced .status-dot { background: var(--text); }
-.sync-indicator.failed .status-dot, .sync-indicator.external-change .status-dot { background: var(--danger); }
 .account-row { justify-content: flex-start; gap: 8px; padding: 6px 2px 0; color: var(--muted); font-size: 12px; }
 .account-row img { width: 23px; height: 23px; border-radius: 50%; background: var(--hover); object-fit: cover; }
 .logout-button { margin-left: auto; font-size: 16px; }
@@ -110,29 +107,22 @@ button { cursor: pointer; }
 .crumb-slash { color: var(--subtle); }
 .topbar-right { gap: 16px; }
 .mobile-explorer-toggle { display: none; min-height: 28px; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); background: var(--surface); font-size: 11px; }
-.document-tabs { display: flex; height: 35px; flex: 0 0 35px; align-items: stretch; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--border); background: var(--sidebar); }
-.document-tab { display: flex; min-width: 90px; max-width: 220px; align-items: center; border-right: 1px solid var(--border); color: var(--muted); }
-.document-tab.active { color: var(--text); background: var(--surface); box-shadow: inset 0 -2px var(--accent); }
-.document-tab-label { min-width: 0; flex: 1; overflow: hidden; padding: 0 9px; border: 0; color: inherit; background: transparent; text-align: left; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-.document-tab-close { width: 24px; height: 24px; flex: 0 0 24px; border: 0; border-radius: 4px; color: var(--subtle); background: transparent; }
-.document-tab-close .app-icon, .modal-close .app-icon { width: 14px; height: 14px; margin: 0 auto; }
-.document-tab-close:hover { color: var(--text); background: var(--hover); }
+.modal-close .app-icon { width: 14px; height: 14px; margin: 0 auto; }
 .save-label { display: flex; align-items: center; gap: 7px; color: var(--muted); white-space: nowrap; }
 .save-label .status-dot { width: 6px; height: 6px; flex-basis: 6px; }
 .save-label.active .status-dot { background: var(--warning); }
 .collaborators { color: var(--muted); font-size: 11px; }
-.editor-layout { display: flex; width: min(1440px, 100%); height: auto; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; margin: 0 auto; padding: 18px clamp(18px, 4vw, 54px) 16px; }
+.editor-layout { position: relative; display: flex; width: min(1440px, 100%); height: auto; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; margin: 0 auto; padding: 18px clamp(18px, 4vw, 54px) 16px; }
 .editor-heading { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 16px; padding: 3px 0 10px; }
 .editor-title-block { min-width: 0; }
-.editor-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
 .outline-control { position: relative; }
-.outline-button { width: 29px; height: 29px; border: 1px solid var(--border); background: var(--surface); font-size: 15px; }
-.outline-popover { position: absolute; z-index: 4; top: calc(100% + 6px); right: 0; display: flex; width: min(260px, 70vw); max-height: min(50dvh, 360px); flex-direction: column; overflow: auto; padding: 5px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); box-shadow: 0 8px 24px #0002; }
+.outline-rail { position: absolute; z-index: 3; top: 18px; right: 7px; }
+.outline-button { width: 30px; height: 30px; color: var(--muted); background: var(--surface); opacity: 0; pointer-events: none; transform: translateX(4px); transition: opacity 140ms ease, transform 140ms ease; }
+.outline-button.revealed, .outline-button.active, .outline-button:focus-visible { opacity: 1; pointer-events: auto; transform: translateX(0); }
+.outline-popover { position: absolute; z-index: 4; top: 0; right: 36px; display: flex; width: min(260px, 70vw); max-height: min(50dvh, 360px); flex-direction: column; overflow: auto; padding: 5px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); box-shadow: 0 3px 10px #0002; }
 .outline-popover button { min-height: 28px; overflow: hidden; padding-right: 8px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; text-align: left; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .outline-popover button:hover { color: var(--text); background: var(--hover); }
 .outline-popover > span { padding: 8px; color: var(--muted); font-size: 11px; }
-.save-button { min-height: 29px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface); font-size: 11px; }
-.save-button:hover { background: var(--hover); }
 .editor-heading h1 { overflow: hidden; margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.025em; text-overflow: ellipsis; white-space: nowrap; }
 .live-presence { margin-top: 5px; color: var(--muted); font-size: 11px; }
 .editor-columns { display: flex; min-height: 0; flex: 1; overflow: hidden; background: var(--bg); }
@@ -194,7 +184,7 @@ button { cursor: pointer; }
   .mobile-explorer-closed .sidebar { height: 0; min-height: 0; max-height: 0; padding: 0; border: 0; }
   .sidebar-top { padding-bottom: 8px; }.workspace-select { padding: 6px 7px 8px; }.sidebar-bottom { display: none; }
   .main-panel { height: 100%; min-height: 0; }.topbar { height: 42px; flex-basis: 42px; font-size: 11px; }.save-label { font-size: 0; }.mobile-explorer-toggle { display: inline-flex; align-items: center; }
-  .editor-layout { height: auto; min-height: 0; padding: 10px; }.editor-heading { padding-bottom: 9px; }.editor-heading h1 { font-size: 16px; }.editor-controls { gap: 4px; }
+  .editor-layout { height: auto; min-height: 0; padding: 10px; }.editor-heading { padding-bottom: 9px; }.editor-heading h1 { font-size: 16px; }
   .editor-columns { min-height: 0; }.source-column { min-height: 0; }
   .welcome-card { padding: 24px; }
 }

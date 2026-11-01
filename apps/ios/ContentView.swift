@@ -84,7 +84,7 @@ struct ContentView: View {
 
     private var markdownEditor: some View {
         TextEditor(text: Binding(get: { model.markdown }, set: { model.editMarkdown($0) }))
-            .font(.system(.body, design: .monospaced))
+            .font(.system(.body, design: .default))
             .padding()
             .navigationTitle(model.activeFile?.path ?? "Markdown")
             .safeAreaInset(edge: .bottom) {

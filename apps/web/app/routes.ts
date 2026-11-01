@@ -1,3 +1,3 @@
-import { index, route } from "@react-router/dev/routes";
+import { route } from "@react-router/dev/routes";
 
-export default [index("routes/home.tsx"), route("health", "routes/health.ts")];
+export default [route("*", "routes/home.tsx"), route("health", "routes/health.ts")];

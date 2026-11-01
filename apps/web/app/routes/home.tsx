@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { IndexeddbPersistence } from "y-indexeddb";
 import * as Y from "yjs";
-import { useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 import type { Route } from "./+types/home";
 
 const MarkdownCodeEditor = lazy(() => import("../components/MarkdownCodeEditor").then((module) => ({ default: module.MarkdownCodeEditor })));
@@ -33,6 +33,25 @@ function parentPath(path: string): string {
 
 function entryName(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
+}
+
+function mergeFileRecords(current: FileRecord[], incoming: FileRecord[]): FileRecord[] {
+  const byPath = new Map(current.map((file) => [file.path, file]));
+  for (const file of incoming) byPath.set(file.path, file);
+  return [...byPath.values()];
+}
+
+interface FileLocation { workspaceId: string; path: string }
+type FileNavigation = "push" | "replace" | "none";
+function fileLocationPath(workspaceId: string, path: string): string {
+  return `/workspace/${encodeURIComponent(workspaceId)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+function parseFileLocation(pathname: string): FileLocation | null {
+  if (!pathname.startsWith("/workspace/")) return null;
+  const segments = pathname.slice("/workspace/".length).split("/");
+  if (segments.length < 2 || !segments[0]) return null;
+  try { return { workspaceId: decodeURIComponent(segments[0]), path: segments.slice(1).map(decodeURIComponent).join("/") }; }
+  catch { return null; }
 }
 
 function matchesExcludePattern(path: string, pattern: string): boolean {
@@ -102,9 +121,9 @@ export default function Home() {
   const [excludedPatterns, setExcludedPatterns] = useState("");
   const [showFileFilters, setShowFileFilters] = useState(false);
   const [outlineOpen, setOutlineOpen] = useState(false);
+  const [outlineHover, setOutlineHover] = useState(false);
   const [mobileExplorerOpen, setMobileExplorerOpen] = useState(true);
   const [activeFile, setActiveFile] = useState<FileRecord | null>(null);
-  const [openTabs, setOpenTabs] = useState<FileRecord[]>([]);
   const [quickOpen, setQuickOpen] = useState(false);
   const [quickQuery, setQuickQuery] = useState("");
   const [text, setText] = useState("");
@@ -113,6 +132,8 @@ export default function Home() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [showRepositories, setShowRepositories] = useState(false);
   const [saving, setSaving] = useState(false);
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -120,7 +141,8 @@ export default function Home() {
   const treeRef = useRef<HTMLElement>(null);
   const quickOpenInput = useRef<HTMLInputElement>(null);
   const editorNavigate = useRef<((line: number) => void) | null>(null);
-  const openFileRef = useRef<((file: FileRecord) => Promise<void>) | null>(null);
+  const routedPath = useRef<string | null>(null);
+  const openFileRef = useRef<((file: FileRecord, historyAction?: FileNavigation) => Promise<void>) | null>(null);
   const docs = useRef(new Map<string, { doc: Y.Doc; persistence: IndexeddbPersistence; observer?: () => void; updateHandler?: (update: Uint8Array, origin: unknown) => void }>());
   const activeRef = useRef<{ file: FileRecord | null; doc: Y.Doc | null; text: Y.Text | null; value: string }>({ file: null, doc: null, text: null, value: "" });
   const pending = useRef(new Map<string, RealtimeMessage>());
@@ -383,7 +405,14 @@ export default function Home() {
     localStorage.setItem(`pkms:tree:${activeWorkspace.id}`, JSON.stringify({ expanded: [...expandedFolders].filter(Boolean), currentFolder }));
   }, [activeWorkspace?.id, currentFolder, expandedFolders, loadedFolders]);
 
-  const openFile = useCallback(async (file: FileRecord) => {
+  const openFile = useCallback(async (file: FileRecord, historyAction: FileNavigation = "push") => {
+    if (activeWorkspace && historyAction !== "none") {
+      const target = fileLocationPath(activeWorkspace.id, file.path);
+      if (location.pathname !== target) {
+        routedPath.current = target;
+        navigate(target, { replace: historyAction === "replace", preventScrollReset: true });
+      }
+    }
     setNotice("");
     if (window.matchMedia("(max-width: 580px)").matches) setMobileExplorerOpen(false);
     const parent = parentPath(file.path);
@@ -394,7 +423,6 @@ export default function Home() {
       while (ancestor) { next.add(ancestor); ancestor = parentPath(ancestor); }
       return next;
     });
-    setOpenTabs((current) => current.some((entry) => entry.id === file.id) ? current.map((entry) => entry.id === file.id ? file : entry) : [...current, file]);
     const previous = activeRef.current;
     if (previous.file && previous.text) {
       const oldEntry = docs.current.get(previous.file.id);
@@ -472,8 +500,64 @@ export default function Home() {
       currentSocket.send(JSON.stringify({ type: "document-update", operationId, fileId: file.id, update: toBase64(Y.encodeStateAsUpdate(entry.doc)) }));
     }
     hydrating.current = false;
-  }, [activeWorkspace?.id, api, scheduleAutoSave]);
+  }, [activeWorkspace, api, location.pathname, navigate, scheduleAutoSave]);
   openFileRef.current = openFile;
+
+  const fileLocation = parseFileLocation(location.pathname);
+  useEffect(() => {
+    if (loading || !user) return;
+    if (!fileLocation) {
+      if (location.pathname === "/" && activeRef.current.file) clearActiveFile();
+      routedPath.current = null;
+      return;
+    }
+    if (!workspaces.length) return;
+    const workspace = workspaces.find((item) => item.id === fileLocation.workspaceId);
+    if (!workspace) {
+      routedPath.current = null;
+      navigate("/", { replace: true });
+      return;
+    }
+    if (activeWorkspace?.id !== workspace.id) {
+      clearActiveFile();
+      setCurrentFolder("");
+      setExpandedFolders(new Set([""]));
+      setLoadedFolders(new Set());
+      setActiveWorkspace(workspace);
+      routedPath.current = null;
+      return;
+    }
+    if (!loadedFolders.has("")) return;
+    if (routedPath.current === location.pathname) return;
+    routedPath.current = location.pathname;
+    let records = files;
+    const parent = parentPath(fileLocation.path);
+    const folders = parent ? parent.split("/") : [];
+    let prefix = "";
+    void (async () => {
+      try {
+        for (const folder of folders) {
+          prefix = prefix ? `${prefix}/${folder}` : folder;
+          if (loadedFolders.has(prefix)) continue;
+          const result = await api<{ files: FileRecord[] }>(`/api/workspaces/${workspace.id}/directory?path=${encodeURIComponent(prefix)}`);
+          records = mergeFileRecords(records, result.files);
+          setFiles(records);
+          setLoadedFolders((current) => new Set(current).add(prefix));
+        }
+        if (routedPath.current !== location.pathname) return;
+        const target = records.find((file) => file.path === fileLocation.path && file.kind !== "folder");
+        if (!target) {
+          setError("File not found in this repository.");
+          navigate("/", { replace: true });
+          return;
+        }
+        if (activeRef.current.file?.id !== target.id) await openFileRef.current?.(target, "none");
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Could not open file from URL");
+        navigate("/", { replace: true });
+      }
+    })();
+  }, [activeWorkspace?.id, api, fileLocation?.path, fileLocation?.workspaceId, files, loadedFolders, loading, location.pathname, navigate, user, workspaces]);
 
   const toggleFolder = async (file: FileRecord) => {
     if (!activeWorkspace) return;
@@ -495,7 +579,9 @@ export default function Home() {
   };
 
   const chooseWorkspace = (workspace: Workspace) => {
-    setActiveWorkspace(workspace); clearActiveFile(); setOpenTabs([]); setCurrentFolder(""); setExpandedFolders(new Set([""])); setLoadedFolders(new Set());
+    setActiveWorkspace(workspace); clearActiveFile(); setCurrentFolder(""); setExpandedFolders(new Set([""])); setLoadedFolders(new Set());
+    routedPath.current = null;
+    navigate("/", { preventScrollReset: true });
   };
 
   const openRepositoryPicker = async () => {
@@ -512,9 +598,11 @@ export default function Home() {
     try {
       const result = await api<{ workspace: Workspace }>("/api/workspaces", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repository: repository.fullName, branch: repository.defaultBranch }) });
       setShowRepositories(false);
-      clearActiveFile(); setOpenTabs([]); setCurrentFolder(""); setExpandedFolders(new Set([""])); setLoadedFolders(new Set());
+      clearActiveFile(); setCurrentFolder(""); setExpandedFolders(new Set([""])); setLoadedFolders(new Set());
       await refreshWorkspaces();
       setActiveWorkspace(result.workspace);
+      routedPath.current = null;
+      navigate("/", { preventScrollReset: true });
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not connect repository"); }
   };
 
@@ -608,18 +696,7 @@ export default function Home() {
     }
   };
 
-  const closeTab = (file: FileRecord) => {
-    const index = openTabs.findIndex((entry) => entry.id === file.id);
-    const nextTabs = openTabs.filter((entry) => entry.id !== file.id);
-    setOpenTabs(nextTabs);
-    if (activeFile?.id === file.id) {
-      const nextFile = nextTabs[Math.min(index, nextTabs.length - 1)];
-      if (nextFile) void openFile(nextFile);
-      else clearActiveFile();
-    }
-  };
-
-  const quickOpenResults = [...new Map([...visibleFiles, ...openTabs].filter((file) => file.kind !== "folder").map((file) => [file.id, file])).values()]
+  const quickOpenResults = [...new Map(visibleFiles.filter((file) => file.kind !== "folder").map((file) => [file.id, file])).values()]
     .filter((file) => !quickQuery.trim() || file.path.toLocaleLowerCase().includes(quickQuery.trim().toLocaleLowerCase()))
     .slice(0, 30);
 
@@ -632,8 +709,13 @@ export default function Home() {
       });
       const snapshot = await api<{ files: FileRecord[] }>(`/api/workspaces/${activeWorkspace.id}/snapshot`);
       setFiles(snapshot.files);
-      setOpenTabs((current) => current.map((tab) => snapshot.files.find((entry) => entry.id === tab.id) ?? tab));
-      if (activeFile?.id === file.id) setActiveFile(snapshot.files.find((entry) => entry.id === file.id) ?? null);
+      const renamedActive = activeFile?.id === file.id ? snapshot.files.find((entry) => entry.id === file.id) : null;
+      if (renamedActive) {
+        setActiveFile(renamedActive);
+        const target = fileLocationPath(activeWorkspace.id, renamedActive.path);
+        routedPath.current = target;
+        navigate(target, { replace: true, preventScrollReset: true });
+      }
       const destination = result.conflictCopyPath ?? toPath;
       if (file.kind === "folder" && (currentFolder === file.path || currentFolder.startsWith(`${file.path}/`))) {
         setCurrentFolder(`${destination}${currentFolder.slice(file.path.length)}`);
@@ -670,7 +752,8 @@ export default function Home() {
         body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "delete", fileId: activeFile.id } }),
       });
       clearActiveFile();
-      setOpenTabs((current) => current.filter((file) => file.id !== activeFile.id));
+      routedPath.current = null;
+      navigate("/", { replace: true, preventScrollReset: true });
       setFiles((current) => current.filter((file) => file.id !== activeFile.id));
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not delete item"); }
   };
@@ -684,7 +767,6 @@ export default function Home() {
         body: JSON.stringify({ operationId: id(), baseRevision: activeWorkspace.revision, clientId: `web-${id()}`, operation: { type: "delete", fileId: folder.id } }),
       });
       setFiles((current) => current.filter((file) => file.path !== currentFolder && !file.path.startsWith(`${currentFolder}/`)));
-      setOpenTabs((current) => current.filter((file) => file.path !== currentFolder && !file.path.startsWith(`${currentFolder}/`)));
       setExpandedFolders((current) => new Set([...current].filter((path) => path !== currentFolder && !path.startsWith(`${currentFolder}/`))));
       setCurrentFolder(parentFolder);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not delete folder"); }
@@ -709,13 +791,13 @@ export default function Home() {
           <button className="icon-button" title="Add repository" onClick={openRepositoryPicker}><AppIcon name="plus" /></button>
         </div>
         <div className="workspace-select">
-          <span className="eyebrow">WORKSPACE</span>
+          <span className="eyebrow">Workspace</span>
           {workspaces.length ? <select value={activeWorkspace?.id ?? ""} onChange={(event) => { const workspace = workspaces.find((item) => item.id === event.target.value); if (workspace) chooseWorkspace(workspace); }}>
             {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.repository}</option>)}
           </select> : <button className="connect-link" onClick={openRepositoryPicker}>Connect a repository <span>↗</span></button>}
         </div>
         {activeWorkspace && <>
-          <div className="file-toolbar"><span className="eyebrow">FILES</span><div className="toolbar-actions">
+          <div className="file-toolbar"><span className="eyebrow">Files</span><div className="toolbar-actions">
             <button className={`mini-button visibility-button${showFileFilters ? " active" : ""}`} title="File visibility settings" aria-label="File visibility settings" aria-expanded={showFileFilters} onClick={() => setShowFileFilters((open) => !open)}><AppIcon name="filter" /></button>
             <button className="mini-button" title="New note" onClick={newNote}><AppIcon name="filePlus" /></button>
             <button className="mini-button" title="New folder" onClick={newFolder}><AppIcon name="folderPlus" /></button>
@@ -748,7 +830,6 @@ export default function Home() {
           </nav>
         </>}
         <div className="sidebar-bottom">
-          <div className={`sync-indicator ${sync.githubStatus}`}><span className="status-dot" /><span>{sync.githubStatus === "synced" ? "Synced" : sync.githubStatus === "pending" ? "Saving" : sync.githubStatus === "external-change" ? "GitHub changed" : "Sync error"}</span></div>
           <div className="account-row"><img src={user.avatarUrl} alt="" /><span>@{user.login}</span><button className="icon-button logout-button" title="Sign out" onClick={() => void api("/api/logout", { method: "POST" }).then(() => window.location.reload())}><AppIcon name="logout" /></button></div>
         </div>
       </aside>
@@ -762,15 +843,15 @@ export default function Home() {
             {peers.length > 1 && <div className="collaborators" aria-label="Collaborators"><span>{peers.length} here</span></div>}
           </div>
         </header>
-        {!!openTabs.length && <nav className="document-tabs" aria-label="Open documents">{openTabs.map((file) => <div key={file.id} className={`document-tab${activeFile?.id === file.id ? " active" : ""}`}><button className="document-tab-label" onClick={() => void openFile(file)} title={file.path}>{entryName(file.path)}</button><button className="document-tab-close" onClick={() => closeTab(file)} aria-label={`Close ${entryName(file.path)}`}><AppIcon name="close" /></button></div>)}</nav>}
         {error && <button className="notice error dismissible" onClick={() => setError("")}>{error}<AppIcon name="close" /></button>}
         {showRepositories && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowRepositories(false); }}><section className="repository-modal">
-          <button className="modal-close" onClick={() => setShowRepositories(false)} aria-label="Close"><AppIcon name="close" /></button><span className="eyebrow">GITHUB</span><h2>Choose a repository</h2>
+          <button className="modal-close" onClick={() => setShowRepositories(false)} aria-label="Close"><AppIcon name="close" /></button><span className="eyebrow">GitHub</span><h2>Choose a repository</h2>
           <div className="repository-list">{repositories.map((repository) => <button key={repository.fullName} className="repository-option" onClick={() => void connectRepository(repository)}><span className="repo-icon"><AppIcon name={repository.private ? "lock" : "folder"} /></span><span><strong>{repository.fullName}</strong><small>{repository.defaultBranch} · {repository.private ? "Private" : "Public"}</small></span><span className="option-arrow"><AppIcon name="arrowRight" /></span></button>)}{!repositories.length && <p className="empty-hint">No writable repositories found.</p>}</div>
         </section></div>}
         {quickOpen && <div className="modal-backdrop quick-open-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuickOpen(false); }}><section className="quick-open-modal" role="dialog" aria-modal="true" aria-label="Quick open"><input ref={quickOpenInput} value={quickQuery} onChange={(event) => setQuickQuery(event.target.value)} placeholder="Search open and loaded files…" onKeyDown={(event) => { if (event.key === "Escape") setQuickOpen(false); else if (event.key === "Enter" && quickOpenResults[0]) { void openFile(quickOpenResults[0]); setQuickOpen(false); } }} /><div className="quick-open-results">{quickOpenResults.map((file) => <button key={file.id} onClick={() => { void openFile(file); setQuickOpen(false); }}><span>{entryName(file.path)}</span><small>{file.path}</small></button>)}{!quickOpenResults.length && <p className="empty-hint">No loaded files found</p>}</div></section></div>}
-        {!activeWorkspace ? <div className="empty-workspace"><h2>No workspace</h2><button className="primary-button" onClick={openRepositoryPicker}>Connect repository</button></div> : !activeFile ? <div className="empty-workspace"><h2>No file open</h2><button className="primary-button" onClick={newNote}>New note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout">
-          <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div><div className="editor-controls"><div className="outline-control"><button className={`mini-button outline-button${outlineOpen ? " active" : ""}`} title="Note outline" aria-label="Note outline" aria-expanded={outlineOpen} onClick={() => setOutlineOpen((open) => !open)}><AppIcon name="list" /></button>{outlineOpen && <div className="outline-popover" role="navigation" aria-label="Note outline">{outlineItems.length ? outlineItems.map((item) => <button key={`${item.line}-${item.title}`} style={{ paddingLeft: 8 + (item.level - 1) * 11 }} title={item.title} onClick={() => { setOutlineOpen(false); requestAnimationFrame(() => editorNavigate.current?.(item.line)); }}>{item.title}</button>) : <span>No headings</span>}</div>}</div><button className="save-button" onClick={saveActiveFileNow} title="Save now (⌘S / Ctrl+S)">Save</button></div></div>
+        {!activeWorkspace ? <div className="empty-workspace"><h2>No workspace</h2><button className="primary-button" onClick={openRepositoryPicker}>Connect repository</button></div> : !activeFile ? <div className="empty-workspace"><h2>No file open</h2><button className="primary-button" onClick={newNote}>New note</button></div> : activeFile.kind === "markdown" ? <div className="editor-layout" onPointerMove={(event) => { const next = event.currentTarget.getBoundingClientRect().right - event.clientX < 48; setOutlineHover((current) => current === next ? current : next); }} onPointerLeave={() => setOutlineHover(false)}>
+          <div className="editor-heading"><div className="editor-title-block"><h1>{activeFile.path.split("/").at(-1)?.replace(/\.md$/i, "")}</h1>{peers.length > 1 && <div className="live-presence">{peers.length} editing</div>}</div></div>
+          <div className="outline-control outline-rail"><button className={`mini-button outline-button${outlineOpen ? " active" : ""}${outlineHover || outlineOpen ? " revealed" : ""}`} title="Note outline" aria-label="Note outline" aria-expanded={outlineOpen} onClick={() => setOutlineOpen((open) => !open)}><AppIcon name="list" /></button>{outlineOpen && <div className="outline-popover" role="navigation" aria-label="Note outline">{outlineItems.length ? outlineItems.map((item) => <button key={`${item.line}-${item.title}`} style={{ paddingLeft: 8 + (item.level - 1) * 11 }} title={item.title} onClick={() => { setOutlineOpen(false); requestAnimationFrame(() => editorNavigate.current?.(item.line)); }}>{item.title}</button>) : <span>No headings</span>}</div>}</div>
           <div className="editor-columns"><div className="source-column"><Suspense fallback={<div className="editor-loading">Opening editor…</div>}><MarkdownCodeEditor key={activeFile.id} value={text} onChange={handleText} onNavigateReady={registerEditorNavigator} /></Suspense></div></div>
         </div> : <div className="asset-view"><div className="file-icon large"><AppIcon name="file" /></div><h2>{activeFile.path.split("/").at(-1)}</h2><p>{activeFile.size ? `${(activeFile.size / 1024).toFixed(1)} KB` : "Attachment"}</p><a className="primary-button" href={`/api/workspaces/${activeWorkspace.id}/assets/${activeFile.id}`} target="_blank" rel="noreferrer">Open file</a></div>}
         {sync.githubStatus === "external-change" && <div className="external-warning"><strong>GitHub branch changed outside PKMS.</strong><span>PKMS paused its commit so it won’t overwrite that change. {sync.message}</span></div>}
